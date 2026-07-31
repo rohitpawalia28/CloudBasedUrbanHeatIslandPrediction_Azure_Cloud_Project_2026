@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Environment variables and credentials
+.env
+.env.*
+*.pem
+*.key
+aws-credentials*
+
+# Data and generated outputs
+data/raw/*
+data/processed/*
+!data/raw/README.md
+!data/processed/README.md
+results/generated/*
+!results/generated/README.md
+
+# GIS / raster temporary files
+*.aux.xml
+*.ovr
+*.qgz~
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
