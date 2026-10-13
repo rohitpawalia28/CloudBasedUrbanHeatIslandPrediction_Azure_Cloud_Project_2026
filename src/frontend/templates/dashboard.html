@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Urban Heat Island Dashboard</h1><p>Surface UHI intensity across {{ cfg.STUDY_AREA.name }} predicted by the deployed SageMaker endpoint.</p></div>
+  <div class="actions">
+    <a class="btn" href="/map">Open heat map</a>
+    {% if can("states:StartExecution") %}<button class="btn primary" id="runPipe">Run cloud pipeline</button>{% endif %}
+  </div>
+</div>
+
+<div id="statusBanner"></div>
+
+<div class="grid g4" id="kpis">
+  <div class="card kpi"><label>Mean UHI intensity</label><div class="v" id="k-mean">–</div><div class="sub" id="k-date">latest observation</div></div>
+  <div class="card kpi hot"><label>Peak UHI intensity</label><div class="v" id="k-max">–</div><div class="sub">hottest 1 km cell</div></div>
+  <div class="card kpi"><label>High / severe risk cells</label><div class="v" id="k-hot">–</div><div class="sub" id="k-hot-sub">of grid cells</div></div>
+  <div class="card kpi"><label>Deployed model</label><div class="v" id="k-r2">–</div><div class="sub" id="k-model">R² on unseen spatial blocks</div></div>
+</div>
+
+<div class="grid g-2-1 mt">
+  <div class="card"><div class="card-head"><h2>UHI trend by acquisition date</h2><small>°C above rural reference</small></div><div class="chart-box"><canvas id="trendChart"></canvas></div></div>
+  <div class="card"><div class="card-head"><h2>Heat-risk distribution</h2><small id="riskDate"></small></div><div class="chart-box"><canvas id="riskChart"></canvas></div></div>
+</div>
+
+<div class="grid g2 mt">
+  <div class="card"><div class="card-head"><h2>UHI by land use</h2><small>mean vs max, latest date</small></div><div class="chart-box"><canvas id="classChart"></canvas></div></div>
+  <div class="card flush">
+    <div class="card-head" style="padding:16px 18px 0"><h2>Hottest grid cells</h2><a href="/map" class="hint">View on map →</a></div>
+    <div class="table-wrap" style="max-height:290px"><table class="tbl"><thead><tr><th>Cell</th><th>Location</th><th>Land use</th><th class="right">UHI °C</th><th>Risk</th></tr></thead><tbody id="hotTable"><tr><td colspan="5" class="empty">Waiting for predictions…</td></tr></tbody></table></div>
+  </div>
+</div>
+
+<div class="grid g-2-1 mt">
+  <div class="card flush">
+    <div class="card-head" style="padding:16px 18px 0"><h2>Cloud service health</h2><small id="modeNote"></small></div>
+    <table class="tbl"><thead><tr><th>Service</th><th>Status</th><th>Detail</th></tr></thead><tbody id="svcTable"></tbody></table>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>Last pipeline execution</h2><a class="hint" href="/pipeline">Details →</a></div>
+    <div id="lastExec" class="muted">–</div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const LULC = {{ cfg.LULC_CLASSES | tojson }};
+let wasRunning = false, timer = null;
+
+async function loadStatus() {
+  const st = await UHI.api("/platform/status");
+  document.getElementById("svcTable").innerHTML = st.services.map(s =>
+    `<tr><td><b>${s.service}</b></td><td>${UHI.badge(s.status)}</td><td class="muted">${UHI.esc(s.detail)}</td></tr>`).join("");
+  document.getElementById("modeNote").textContent = st.mode === "aws" ? `mirroring to AWS (${st.aws.region})` : "emulated AWS account";
+  const ex = st.lastExecution;
+  document.getElementById("lastExec").innerHTML = ex ? `
+    <div class="row" style="margin-bottom:10px">${UHI.badge(ex.status)} <code>${ex.name}</code></div>
+    <dl class="kv"><dt>Started</dt><dd>${UHI.local(ex.startDate)}</dd><dt>Started by</dt><dd>${UHI.esc(ex.startedBy)}</dd>
+    <dt>Duration</dt><dd>${ex.durationS ? ex.durationS + " s" : "running…"}</dd>
+    <dt>States</dt><dd>${ex.states.filter(s => s.status === "SUCCEEDED").length} / ${ex.states.length} succeeded</dd></dl>
+    ${ex.error ? `<p class="badge bad" style="margin-top:10px">${UHI.esc(ex.error)}</p>` : ""}` : "No executions yet.";
+  const banner = document.getElementById("statusBanner");
+  if (st.pipelineRunning) {
+    const ex = st.lastExecution, cur = ex?.states.find(s => s.status === "RUNNING");
+    banner.innerHTML = `<div class="banner info"><div class="spinner"></div><div><b>Cloud pipeline running</b> — ${cur ? "current state: <code>" + cur.name + "</code>" : "starting"}.
+      The dashboard refreshes automatically when the new model is deployed.</div></div>`;
+    wasRunning = true;
+  } else {
+    banner.innerHTML = "";
+    if (wasRunning) { wasRunning = false; loadOverview(); UHI.toast("Pipeline finished — dashboard updated"); }
+  }
+}
+
+async function loadOverview() {
+  const o = await UHI.api("/overview");
+  if (!o.ready) {
+    document.getElementById("statusBanner").innerHTML = o.pipelineRunning ? "" :
+      `<div class="banner warn">No predictions yet. Run the cloud pipeline to ingest data, train models and deploy the endpoint.</div>`;
+    return;
+  }
+  const k = o.kpi;
+  document.getElementById("k-mean").innerHTML = `+${UHI.num(k.mean_uhi)}<small> °C</small>`;
+  document.getElementById("k-max").innerHTML = `+${UHI.num(k.max_uhi)}<small> °C</small>`;
+  document.getElementById("k-hot").textContent = k.hot.toLocaleString();
+  document.getElementById("k-hot-sub").textContent = `of ${k.cells.toLocaleString()} grid cells (${UHI.num(100 * k.hot / k.cells, 1)}%)`;
+  document.getElementById("k-date").textContent = `mean LST ${UHI.num(k.mean_lst, 1)} °C · ${o.latestDate}`;
+  if (o.model) {
+    document.getElementById("k-r2").textContent = UHI.num(o.model.metrics.R2, 3);
+    document.getElementById("k-model").textContent = `${o.model.label} · v${o.model.version} · RMSE ${UHI.num(o.model.metrics.RMSE)} °C`;
+  }
+  UHI.chart("trendChart", { type: "line", data: { labels: o.trend.map(t => t.obs_date), datasets: [
+      { label: "Mean UHI", data: o.trend.map(t => t.mean_uhi), borderColor: UHI.PALETTE[0], backgroundColor: "rgba(232,89,12,.12)", fill: true, tension: .3 },
+      { label: "Max UHI", data: o.trend.map(t => t.max_uhi), borderColor: "#a50026", borderDash: [5, 4], tension: .3 },
+      { label: "Mean LST (right axis)", data: o.trend.map(t => t.mean_lst), borderColor: UHI.PALETTE[1], yAxisID: "y2", tension: .3 } ] },
+    options: { scales: { y: { title: { display: true, text: "UHI °C" } }, y2: { position: "right", grid: { display: false }, title: { display: true, text: "LST °C" } } } } });
+  const order = ["Low", "Moderate", "High", "Severe"], colors = ["#4caf50", "#f4c430", "#fd8d3c", "#c4291c"];
+  const rmap = Object.fromEntries(o.risk.map(r => [r.risk_level, r.n]));
+  document.getElementById("riskDate").textContent = o.latestDate;
+  UHI.chart("riskChart", { type: "doughnut", data: { labels: order, datasets: [{ data: order.map(r => rmap[r] || 0), backgroundColor: colors, borderWidth: 0 }] },
+    options: { cutout: "62%", plugins: { legend: { position: "bottom" } } } });
+  UHI.chart("classChart", { type: "bar", data: { labels: o.byClass.map(c => c.zone), datasets: [
+      { label: "Mean UHI °C", data: o.byClass.map(c => c.mean_uhi), backgroundColor: o.byClass.map(c => UHI.uhiColor(c.mean_uhi)) },
+      { label: "Max UHI °C", data: o.byClass.map(c => c.max_uhi), backgroundColor: "rgba(120,120,140,.25)" } ] },
+    options: { indexAxis: "y" } });
+  const hot = await UHI.api("/hotspots?limit=12");
+  document.getElementById("hotTable").innerHTML = hot.map(h => `<tr><td><code>${h.grid_id}</code></td>
+    <td class="muted nowrap">${h.latitude.toFixed(3)}, ${h.longitude.toFixed(3)}</td><td>${LULC[h.lulc_code]}</td>
+    <td class="num"><b>+${UHI.num(h.uhi_predicted)}</b></td><td>${UHI.risk(h.risk_level)}</td></tr>`).join("");
+}
+
+document.getElementById("runPipe")?.addEventListener("click", async (e) => {
+  e.target.disabled = true;
+  try { const r = await UHI.api("/pipeline/run", { method: "POST", body: {} }); UHI.toast("Started execution " + r.execution); loadStatus(); }
+  finally { e.target.disabled = false; }
+});
+window.addEventListener("themechange", loadOverview);
+loadOverview(); UHI.poll(loadStatus, 3000);
+</script>
+{% endblock %}

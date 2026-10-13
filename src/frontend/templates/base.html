@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }} · UHI Cloud Console</title>
+  <script>try { const t = localStorage.getItem("uhi-theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/console.css') }}">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  {% block head %}{% endblock %}
+</head>
+<body>
+{% set nav = [
+  ("Overview", [
+    ("/", "Dashboard", "", "M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"),
+    ("/map", "Heat Risk Map", "", "M15 5.1 9 3 3 5v16l6-2.1 6 2.1 6-2V3l-6 2.1zM15 19l-6-2.1V5l6 2.1V19z"),
+    ("/predict", "Predict UHI", "SageMaker", "M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm1 15h-2v-6h2zm0-8h-2V7h2z"),
+  ]),
+  ("Data & ML pipeline", [
+    ("/data-lake", "Data Lake", "S3", "M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zm0 3v4c0 1.7 3.6 3 8 3s8-1.3 8-3V9c0 1.7-3.6 3-8 3S4 10.7 4 9zm0 6v3c0 1.7 3.6 3 8 3s8-1.3 8-3v-3c0 1.7-3.6 3-8 3s-8-1.3-8-3z"),
+    ("/pipeline", "Pipeline", "Step Fn · Glue · λ", "M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm13 0h3v3h-3zm-3 3h3v3h-3zM7 10v4M10 7h4"),
+    ("/models", "Models", "SageMaker", "M12 2 2 7l10 5 10-5-10-5zm-10 10 10 5 10-5M2 17l10 5 10-5"),
+  ]),
+  ("Operations", [
+    ("/monitoring", "Monitoring", "CloudWatch", "M3 3v18h18M7 15l4-4 3 3 5-6"),
+    ("/alerts", "Alerts", "SNS", "M12 22a2 2 0 0 0 2-2h-4a2 2 0 0 0 2 2zm6-6V11c0-3.1-1.6-5.6-4.5-6.3V4a1.5 1.5 0 0 0-3 0v.7C7.6 5.4 6 7.9 6 11v5l-2 2v1h16v-1z"),
+    ("/database", "Database", "RDS", "M12 3C7.6 3 4 4.3 4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6c0-1.7-3.6-3-8-3z"),
+  ]),
+  ("Security & access", [
+    ("/api-access", "API Access", "API Gateway", "M8 9l-4 3 4 3m8-6 4 3-4 3M14 5l-4 14"),
+    ("/admin", "Users & Roles", "Cognito · IAM", "M12 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4zm0 2c-2.7 0-8 1.3-8 4v2h16v-2c0-2.7-5.3-4-8-4z"),
+    ("/architecture", "Architecture", "", "M4 5h16v4H4zm0 10h7v4H4zm9 0h7v4h-7zM12 9v3m-4 3v-3h8v3"),
+  ]),
+] %}
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">UHI</div>
+      <div><b>UHI GeoAI Cloud</b><small>Urban Heat Island Platform</small></div>
+    </div>
+    {% for group, items in nav %}
+    <div class="nav-group"><span>{{ group }}</span>
+      {% for href, label, svc, icon in items %}
+      <a class="nav-link {% if active == href %}active{% endif %}" href="{{ href }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="{{ icon }}"/></svg>
+        {{ label }}{% if svc %}<span class="svc">{{ svc }}</span>{% endif %}
+      </a>
+      {% endfor %}
+    </div>
+    {% endfor %}
+    <div class="sidebar-foot">{{ cfg.COURSE }}<br>{{ cfg.AUTHOR }}</div>
+  </aside>
+  <div class="main">
+    <header class="topbar">
+      <div class="crumbs">UHI Cloud Console › <b>{{ title }}</b></div>
+      <div class="spacer"></div>
+      <span class="pill" title="Account {{ cfg.AWS_ACCOUNT_ID }}"><span class="dot"></span>{{ region }} · {{ 'AWS-linked' if cfg.CLOUD_MODE == 'aws' else 'emulated' }}</span>
+      <span class="pill">{{ cfg.STUDY_AREA.name }}</span>
+      <button class="icon-btn" id="themeToggle" title="Toggle dark mode"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
+      <a class="icon-btn" href="/alerts" title="Notifications"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0"/></svg>{% if unread %}<span class="count">{{ unread if unread < 100 else '99+' }}</span>{% endif %}</a>
+      <div class="user-chip">
+        <div class="avatar">{{ (user.name or user.email)[0]|upper }}</div>
+        <div>{{ user.name or user.email }}<small>{{ user.group }} · <a href="/logout">Sign out</a></small></div>
+      </div>
+    </header>
+    <main class="content">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</div>
+<div id="toasts"></div>
+<div class="modal-bg" id="modal"><div class="modal">
+  <div class="modal-head"><h2 class="modal-title" style="margin:0"></h2><button class="btn sm" data-close>Close</button></div>
+  <div class="modal-body"></div>
+</div></div>
+<script src="{{ url_for('static', filename='js/console.js') }}"></script>
+<script>window.ROLE = "{{ user.group }}"; window.CAN = {{ {
+  "train": can("sagemaker:CreateTrainingJob"), "pipeline": can("states:StartExecution"), "upload": can("s3:PutObject"),
+  "admin": can("cognito:AdminUserList"), "alarms": can("cloudwatch:PutMetricAlarm"), "sns": can("sns:Subscribe"),
+  "rds": can("rds:Query"), "lambda": can("lambda:InvokeFunction"), "logs": can("logs:FilterLogEvents") } | tojson }};</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

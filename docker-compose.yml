@@ -1,0 +1,19 @@
+services:
+  uhi-platform:
+    build: .
+    image: uhi-geoai-cloud:latest
+    container_name: uhi-geoai-cloud
+    ports:
+      - "5000:5000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      CLOUD_MODE: ${CLOUD_MODE:-emulated}
+      AWS_REGION: ${AWS_REGION:-ap-south-1}
+    volumes:
+      - uhi-cloud-runtime:/app/cloud_runtime   # persists the emulated AWS account
+    restart: unless-stopped
+
+volumes:
+  uhi-cloud-runtime:

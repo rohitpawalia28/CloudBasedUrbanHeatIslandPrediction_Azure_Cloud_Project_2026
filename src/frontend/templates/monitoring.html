@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Amazon CloudWatch</h1><p>Metrics, logs and alarms emitted by every service in the platform.</p></div>
+  <div class="actions"><select class="in" id="range" style="width:auto"><option value="15">Last 15 minutes</option><option value="60" selected>Last 1 hour</option><option value="360">Last 6 hours</option><option value="1440">Last 24 hours</option></select></div>
+</div>
+<div class="tabs" data-tabs="mTabs">
+  <button class="tab active" data-tab="t-dash">Dashboard</button>
+  <button class="tab" data-tab="t-logs">Logs Insights</button>
+  <button class="tab" data-tab="t-alarms">Alarms</button>
+  <button class="tab" data-tab="t-metrics">All metrics</button>
+</div>
+<div id="mTabs">
+  <div class="tab-panel active" id="t-dash">
+    <div class="grid g4" id="totals"></div>
+    <div class="grid g2 mt">
+      <div class="card"><div class="card-head"><h2>API Gateway requests & errors</h2><small id="period"></small></div><div class="chart-box"><canvas id="c-api"></canvas></div></div>
+      <div class="card"><div class="card-head"><h2>API Gateway latency (avg ms)</h2></div><div class="chart-box"><canvas id="c-lat"></canvas></div></div>
+      <div class="card"><div class="card-head"><h2>Lambda invocations & duration</h2></div><div class="chart-box"><canvas id="c-lambda"></canvas></div></div>
+      <div class="card"><div class="card-head"><h2>SageMaker endpoint invocations & model latency</h2></div><div class="chart-box"><canvas id="c-sm"></canvas></div></div>
+      <div class="card"><div class="card-head"><h2>S3 PUT requests</h2></div><div class="chart-box"><canvas id="c-s3"></canvas></div></div>
+      <div class="card"><div class="card-head"><h2>RDS read IOPS</h2></div><div class="chart-box"><canvas id="c-rds"></canvas></div></div>
+    </div>
+  </div>
+  <div class="tab-panel" id="t-logs">
+    <div class="card">
+      <div class="row">
+        <select class="in grow" id="group"><option value="">All log groups</option></select>
+        <select class="in" id="level" style="width:auto"><option value="">Any level</option><option>INFO</option><option>WARN</option><option>ERROR</option></select>
+        <input class="in grow" id="q" placeholder="Filter pattern, e.g. Duration or grid">
+        <button class="btn primary" id="runQ">Run query</button>
+        <label class="row" style="gap:6px;font-size:13px"><input type="checkbox" id="tail"> Live tail</label>
+      </div>
+    </div>
+    <div class="card flush mt"><div id="logs" style="max-height:620px;overflow:auto"></div></div>
+  </div>
+  <div class="tab-panel" id="t-alarms">
+    <div class="card flush"><table class="tbl"><thead><tr><th>Alarm</th><th>State</th><th>Condition</th><th>Action</th><th>Reason</th><th>Updated</th><th></th></tr></thead><tbody id="alarmBody"></tbody></table></div>
+    {% if can("cloudwatch:PutMetricAlarm") %}
+    <div class="card mt"><h2>Create alarm</h2>
+      <div class="grid g3">
+        <div class="field"><label class="f">Name</label><input class="in" id="a-name" value="UHI-High-Latency"></div>
+        <div class="field"><label class="f">Metric</label><select class="in" id="a-metric"></select></div>
+        <div class="field"><label class="f">Statistic</label><select class="in" id="a-stat"><option>Maximum</option><option>Average</option><option>Sum</option></select></div>
+        <div class="field"><label class="f">Comparison</label><select class="in" id="a-cmp"><option>GreaterThanThreshold</option><option>GreaterThanOrEqualToThreshold</option><option>LessThanThreshold</option></select></div>
+        <div class="field"><label class="f">Threshold</label><input class="in" id="a-th" type="number" value="500"></div>
+        <div class="field"><label class="f">Notify SNS topic</label><select class="in" id="a-sns"><option value="">— none —</option><option>uhi-pipeline-alerts</option><option>uhi-heat-alerts</option></select></div>
+      </div>
+      <button class="btn primary" id="a-create">Create alarm</button></div>
+    {% endif %}
+  </div>
+  <div class="tab-panel" id="t-metrics"><div class="card flush"><div class="table-wrap" style="max-height:640px"><table class="tbl"><thead><tr><th>Namespace</th><th>Metric</th><th>Unit</th><th class="right">Datapoints</th><th>Last</th></tr></thead><tbody id="metricBody"></tbody></table></div></div></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+let metricsCache = null;
+const lbl = s => s.map(p => new Date(p.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+function dual(id, a, b, la, lb, ca = UHI.PALETTE[1], cb = UHI.PALETTE[0], barA = true) {
+  const keys = [...new Set([...a.map(p => p.timestamp), ...b.map(p => p.timestamp)])].sort();
+  const get = (s, k) => (s.find(p => p.timestamp === k) || {}).value ?? 0;
+  UHI.chart(id, { type: "bar", data: { labels: lbl(keys.map(k => ({ timestamp: k }))), datasets: [
+    { type: barA ? "bar" : "line", label: la, data: keys.map(k => get(a, k)), backgroundColor: ca, borderColor: ca },
+    { type: "line", label: lb, data: keys.map(k => get(b, k)), borderColor: cb, backgroundColor: cb, yAxisID: "y2", tension: .3, pointRadius: 2 }] },
+    options: { scales: { y: { beginAtZero: true }, y2: { position: "right", beginAtZero: true, grid: { display: false } } }, plugins: { legend: { position: "bottom" } } } });
+}
+function single(id, s, label, color) {
+  UHI.chart(id, { type: "bar", data: { labels: lbl(s), datasets: [{ label, data: s.map(p => p.value), backgroundColor: color }] }, options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } } });
+}
+async function loadMetrics() {
+  const m = metricsCache = await UHI.api("/cloudwatch/metrics?minutes=" + document.getElementById("range").value);
+  const t = m.totals;
+  document.getElementById("totals").innerHTML = [["API requests", t.apiRequests, `${t.api4xx} 4XX · ${t.api5xx} 5XX`], ["Lambda invocations", t.lambdaInvocations, `${t.lambdaErrors} errors`],
+    ["Endpoint invocations", t.predictions, "SageMaker InvokeEndpoint"], ["Metric series", m.metrics.length, "custom + AWS namespaces"]]
+    .map(([l, v, s]) => `<div class="card kpi"><label>${l}</label><div class="v">${Math.round(v).toLocaleString()}</div><div class="sub">${s}</div></div>`).join("");
+  document.getElementById("period").textContent = `period ${m.periodSeconds}s`;
+  const s = m.series;
+  dual("c-api", s.api_requests, s.api_4xx, "Requests", "4XX errors");
+  single("c-lat", s.api_latency, "Latency ms", UHI.PALETTE[5]);
+  dual("c-lambda", s.lambda_invocations, s.lambda_duration, "Invocations", "Avg duration ms");
+  dual("c-sm", s.sm_invocations, s.sm_latency, "Invocations", "Model latency ms", UHI.PALETTE[2]);
+  single("c-s3", s.s3_puts, "PUT", UHI.PALETTE[0]);
+  single("c-rds", s.rds_reads, "Read IOPS", UHI.PALETTE[3]);
+  document.getElementById("metricBody").innerHTML = m.metrics.map(x => `<tr><td><code>${x.namespace}</code></td><td>${x.metricName}</td><td>${x.unit}</td><td class="num">${x.datapoints}</td><td>${UHI.ago(x.last)}</td></tr>`).join("");
+  const sel = document.getElementById("a-metric");
+  if (sel && !sel.options.length) sel.innerHTML = m.metrics.map(x => `<option value="${x.namespace}|${x.metricName}" ${x.metricName === "Latency" ? "selected" : ""}>${x.namespace} · ${x.metricName}</option>`).join("");
+}
+async function loadLogs() {
+  if (!window.CAN.logs) { document.getElementById("logs").innerHTML = `<div class="empty">Your role cannot read logs (logs:FilterLogEvents denied).</div>`; return; }
+  const p = new URLSearchParams({ group: document.getElementById("group").value, level: document.getElementById("level").value, q: document.getElementById("q").value, limit: 300 });
+  const r = await UHI.api("/cloudwatch/logs?" + p);
+  const sel = document.getElementById("group"), cur = sel.value;
+  sel.innerHTML = `<option value="">All log groups (${r.groups.length})</option>` + r.groups.map(g => `<option value="${g.logGroupName}" ${g.logGroupName === cur ? "selected" : ""}>${g.logGroupName} (${g.events})</option>`).join("");
+  document.getElementById("logs").innerHTML = r.events.map(e => `<div class="log-line"><span class="muted">${new Date(e.timestamp).toLocaleString()}</span>
+    <span class="lvl-${e.level}">${e.level}</span><span class="muted">${UHI.esc(e.logGroup)}</span><span>${UHI.esc(e.message)}</span></div>`).join("") || `<div class="empty">No matching events</div>`;
+}
+async function loadAlarms() {
+  const a = await UHI.api("/cloudwatch/alarms");
+  document.getElementById("alarmBody").innerHTML = a.map(x => `<tr><td><b>${x.name}</b></td><td>${UHI.badge(x.state)}</td>
+    <td><code>${x.statistic}(${x.namespace} ${x.metric}) ${x.comparison.replace("Threshold", "").replace("GreaterThanOrEqualTo", "≥").replace("GreaterThan", ">").replace("LessThan", "<")} ${x.threshold}</code> over ${x.period_s}s</td>
+    <td>${x.sns_topic ? "SNS → " + x.sns_topic : "-"}</td><td class="hint">${UHI.esc(x.state_reason || "")}</td><td>${UHI.ago(x.updated)}</td>
+    <td>${window.CAN.alarms ? `<button class="btn sm danger" data-del="${x.name}">Delete</button>` : ""}</td></tr>`).join("");
+  document.querySelectorAll("[data-del]").forEach(b => b.onclick = async () => { await UHI.api("/cloudwatch/alarms?name=" + encodeURIComponent(b.dataset.del), { method: "DELETE" }); loadAlarms(); });
+}
+document.getElementById("a-create")?.addEventListener("click", async () => {
+  const [ns, metric] = document.getElementById("a-metric").value.split("|");
+  await UHI.api("/cloudwatch/alarms", { method: "POST", body: { name: document.getElementById("a-name").value, namespace: ns, metric, statistic: document.getElementById("a-stat").value,
+    comparison: document.getElementById("a-cmp").value, threshold: document.getElementById("a-th").value, snsTopic: document.getElementById("a-sns").value } });
+  UHI.toast("Alarm created"); loadAlarms();
+});
+document.getElementById("range").onchange = loadMetrics;
+document.getElementById("runQ").onclick = loadLogs;
+document.getElementById("q").onkeydown = e => { if (e.key === "Enter") loadLogs(); };
+document.querySelector('[data-tab="t-logs"]').addEventListener("tabshown", loadLogs);
+document.querySelector('[data-tab="t-alarms"]').addEventListener("tabshown", loadAlarms);
+window.addEventListener("themechange", loadMetrics);
+setInterval(() => { if (document.getElementById("tail").checked) loadLogs(); }, 2500);
+setInterval(() => { if (document.getElementById("t-dash").classList.contains("active")) loadMetrics(); }, 15000);
+loadMetrics();
+</script>
+{% endblock %}

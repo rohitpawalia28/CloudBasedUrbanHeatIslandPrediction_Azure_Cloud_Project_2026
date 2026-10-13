@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+{% block head %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Predict UHI intensity</h1><p>Real-time inference on the <code>uhi-intensity-endpoint</code> SageMaker endpoint via <code>POST /api/v1/predict</code>.</p></div>
+</div>
+<div class="tabs" data-tabs="predictTabs">
+  <button class="tab active" data-tab="t-whatif">What-if scenario</button>
+  <button class="tab" data-tab="t-batch">Batch prediction (CSV)</button>
+  <button class="tab" data-tab="t-history">Request history</button>
+</div>
+<div id="predictTabs">
+  <div class="tab-panel active" id="t-whatif">
+    <div class="grid g-1-2">
+      <div>
+        <div class="card">
+          <h2>1 · Pick a location</h2>
+          <p class="hint" style="margin-top:-6px">Click the map to load that cell's real features, or tune every feature manually.</p>
+          <div id="pickMap" style="height:260px;border-radius:8px"></div>
+          <div class="row mt"><span class="muted" id="locLabel">No location selected</span></div>
+        </div>
+        <div class="card mt" id="resultCard">
+          <h2>Prediction</h2>
+          <div class="result-big" id="resVal">–</div>
+          <div class="row" id="resMeta" style="margin-top:6px"></div>
+          <div id="resDelta" class="mt"></div>
+          <p class="hint mt">Satellite-derived surface UHI (LST above rural reference). Decision support only — not an air-temperature or health warning.</p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>2 · Adjust features</h2>
+          <div class="row">
+            <button class="btn sm" data-preset="green">🌳 Urban greening</button>
+            <button class="btn sm" data-preset="roof">⬜ Cool roofs</button>
+            <button class="btn sm" data-preset="heat">🔥 Heatwave +3 °C</button>
+            <button class="btn sm" data-preset="reset">Reset</button>
+          </div>
+        </div>
+        <div class="grid g2" id="sliders"></div>
+        <div class="row mt"><button class="btn primary" id="predictBtn">Invoke endpoint</button><span class="hint">Predictions update live as you move sliders.</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="t-batch">
+    <div class="grid g-1-2">
+      <div class="card">
+        <h2>Batch transform</h2>
+        <p class="muted">Upload a CSV containing the 11 model features (one row per location). Results are written to <code>s3://{{ cfg.S3_BUCKET }}/predictions/batch/</code> and returned here.</p>
+        <a class="btn" href="/api/v1/predict/template">Download sample CSV</a>
+        <div class="dropzone mt" id="drop">Drop a CSV here or click to choose<input type="file" id="batchFile" accept=".csv" hidden></div>
+        <div id="batchMsg" class="mt"></div>
+      </div>
+      <div class="card flush"><div class="card-head" style="padding:16px 18px 0"><h2>Results preview</h2><span id="batchDl"></span></div>
+        <div class="table-wrap"><table class="tbl" id="batchTable"><tbody><tr><td class="empty">No batch run yet.</td></tr></tbody></table></div></div>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="t-history">
+    <div class="card flush"><div class="table-wrap"><table class="tbl"><thead><tr><th>Time</th><th>User</th><th>Source</th><th>Location</th><th class="right">UHI °C</th><th>Risk</th><th>Model</th><th class="right">Latency</th></tr></thead><tbody id="histBody"></tbody></table></div></div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const LULC = {{ cfg.LULC_CLASSES | tojson }};
+const META = {
+  ndvi: ["NDVI (vegetation)", 0.01], ndbi: ["NDBI (built-up)", 0.01], ndwi: ["NDWI (water)", 0.01], albedo: ["Albedo", 0.005],
+  elevation_m: ["Elevation (m)", 1], distance_to_water_m: ["Distance to water (m)", 50], urban_density: ["Urban density", 0.01],
+  air_temperature_celsius: ["Air temperature (°C)", 0.1], humidity_percent: ["Relative humidity (%)", 0.5], wind_speed_ms: ["Wind speed (m/s)", 0.1],
+  lulc_code: ["Land use class", 1],
+};
+let ranges = {}, loc = null, base = null, marker = null, debounce = null;
+
+// Leaflet is loaded from a CDN; if it is unreachable the sliders still work without the picker map.
+const pm = window.L ? L.map("pickMap").setView([28.62, 77.16], 10) : null;
+if (pm) {
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", { attribution: "&copy; OSM &copy; CARTO" }).addTo(pm);
+  const a = {{ cfg.STUDY_AREA | tojson }};
+  L.rectangle([[a.lat_min, a.lon_min], [a.lat_max, a.lon_max]], { color: "#e8590c", weight: 1.5, fill: false, dashArray: "5 5" }).addTo(pm);
+  pm.on("click", e => setLocation(e.latlng.lat, e.latlng.lng));
+  document.querySelector('[data-tab="t-whatif"]').addEventListener("tabshown", () => setTimeout(() => pm.invalidateSize(), 50));
+} else document.getElementById("pickMap").innerHTML = '<div class="empty">Map library unavailable (offline). Using Connaught Place as the default location.</div>';
+
+function sliderHtml(f) {
+  const r = ranges[f], [label, step] = META[f];
+  if (f === "lulc_code") return `<div class="field"><label class="f">${label}</label><select class="in" data-f="${f}">${Object.entries(LULC).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select></div>`;
+  return `<div class="field"><label class="f">${label} <span class="muted mono" id="v-${f}"></span></label>
+    <input type="range" data-f="${f}" min="${r.min}" max="${r.max}" step="${step}" value="${r.mean}"></div>`;
+}
+function values() {
+  const o = {};
+  document.querySelectorAll("[data-f]").forEach(el => o[el.dataset.f] = +el.value);
+  return o;
+}
+function setValues(v) {
+  Object.entries(v).forEach(([f, x]) => { const el = document.querySelector(`[data-f="${f}"]`); if (el) el.value = x; });
+  showVals();
+}
+function showVals() {
+  document.querySelectorAll('input[type=range][data-f]').forEach(el => document.getElementById("v-" + el.dataset.f).textContent = (+el.value).toFixed(META[el.dataset.f][1] < 1 ? 3 : 1));
+}
+async function predict() {
+  const body = { features: values() };
+  if (loc) Object.assign(body, { latitude: loc[0], longitude: loc[1] });
+  const r = await UHI.api("/predict", { method: "POST", body });
+  const v = r.uhi_intensity_celsius;
+  document.getElementById("resVal").innerHTML = `${v >= 0 ? "+" : ""}${UHI.num(v)}<small style="font-size:18px"> °C</small>`;
+  document.getElementById("resVal").style.color = UHI.uhiColor(Math.max(v, 1.5));
+  document.getElementById("resMeta").innerHTML = `${UHI.risk(r.risk_level)} <span class="hint">model ${r.model_version} · ${r.latency_ms} ms</span>`;
+  const b = r.baseline_uhi;
+  document.getElementById("resDelta").innerHTML = (b !== null && b !== undefined) ?
+    `<div class="banner ${v < b ? "info" : "warn"}" style="margin:0"><div>Scenario changes UHI by <b>${v - b >= 0 ? "+" : ""}${UHI.num(v - b)} °C</b> versus the current cell (+${UHI.num(b)} °C).</div></div>` : "";
+}
+async function setLocation(lat, lon) {
+  loc = [lat, lon];
+  if (pm) { if (marker) marker.remove(); marker = L.marker([lat, lon]).addTo(pm); }
+  const r = await UHI.api("/predict", { method: "POST", body: { latitude: lat, longitude: lon } });
+  base = r.features; setValues(base);
+  document.getElementById("locLabel").innerHTML = `Nearest cell <code>${r.nearest_cell.grid_id}</code> · ${r.nearest_cell.lulc_class} · LST ${UHI.num(r.nearest_cell.lst_celsius, 1)} °C (${r.nearest_cell.date})`;
+  predict();
+}
+(async () => {
+  try { ranges = await UHI.api("/feature-ranges"); }
+  catch (e) { document.getElementById("sliders").innerHTML = `<div class="banner warn">Processed dataset not available yet — run the pipeline first.</div>`; return; }
+  document.getElementById("sliders").innerHTML = Object.keys(META).map(sliderHtml).join("");
+  document.querySelectorAll("[data-f]").forEach(el => el.addEventListener("input", () => { showVals(); clearTimeout(debounce); debounce = setTimeout(predict, 250); }));
+  showVals();
+  const q = new URLSearchParams(location.search);
+  if (q.get("lat")) { setLocation(+q.get("lat"), +q.get("lon")); pm?.setView([+q.get("lat"), +q.get("lon")], 12); }
+  else setLocation(28.6315, 77.2167);
+})();
+document.getElementById("predictBtn").onclick = predict;
+document.querySelectorAll("[data-preset]").forEach(b => b.onclick = () => {
+  const v = values(), p = b.dataset.preset;
+  if (p === "reset") { if (base) setValues(base); }
+  if (p === "green") setValues({ ndvi: Math.min(v.ndvi + 0.15, ranges.ndvi.max), ndbi: v.ndbi - 0.08, ndwi: v.ndwi - 0.1 });
+  if (p === "roof") setValues({ albedo: Math.min(v.albedo + 0.1, ranges.albedo.max) });
+  if (p === "heat") setValues({ air_temperature_celsius: v.air_temperature_celsius + 3, humidity_percent: Math.max(v.humidity_percent - 5, 5), wind_speed_ms: Math.max(v.wind_speed_ms - 1, 0.3) });
+  predict();
+});
+
+// ---- batch
+const drop = document.getElementById("drop"), file = document.getElementById("batchFile");
+drop.onclick = () => file.click();
+drop.ondragover = e => { e.preventDefault(); drop.classList.add("drag"); };
+drop.ondragleave = () => drop.classList.remove("drag");
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove("drag"); runBatch(e.dataTransfer.files[0]); };
+file.onchange = () => runBatch(file.files[0]);
+async function runBatch(f) {
+  if (!f) return;
+  const fd = new FormData(); fd.append("file", f);
+  document.getElementById("batchMsg").innerHTML = `<div class="row"><div class="spinner"></div> Scoring ${UHI.esc(f.name)}…</div>`;
+  try {
+    const r = await UHI.api("/predict/batch", { method: "POST", body: fd });
+    document.getElementById("batchMsg").innerHTML = `<div class="banner info">Scored <b>${r.rows}</b> rows → <code>${r.s3_key}</code></div>`;
+    document.getElementById("batchDl").innerHTML = `<a class="btn sm" href="${r.download}">Download results</a>`;
+    const cols = Object.keys(r.preview[0] || {});
+    document.getElementById("batchTable").innerHTML = `<thead><tr>${cols.map(c => `<th>${c}</th>`).join("")}</tr></thead><tbody>` +
+      r.preview.map(row => `<tr>${cols.map(c => `<td>${c === "risk_level" ? UHI.risk(row[c]) : typeof row[c] === "number" ? UHI.num(row[c], 3) : UHI.esc(row[c])}</td>`).join("")}</tr>`).join("") + "</tbody>";
+  } catch (e) { document.getElementById("batchMsg").innerHTML = `<div class="err-box">${UHI.esc(e.message)}</div>`; }
+}
+
+// ---- history
+document.querySelector('[data-tab="t-history"]').addEventListener("tabshown", async () => {
+  const h = await UHI.api("/predictions/history");
+  document.getElementById("histBody").innerHTML = h.length ? h.map(r => `<tr><td class="nowrap">${UHI.local(r.ts)}</td><td>${UHI.esc(r.user_email)}</td><td>${r.source}</td>
+    <td class="muted">${r.latitude ? (+r.latitude).toFixed(3) + ", " + (+r.longitude).toFixed(3) : "manual"}</td><td class="num">${UHI.num(r.uhi_predicted)}</td>
+    <td>${UHI.risk(r.risk_level)}</td><td><code>${r.model_version}</code></td><td class="num">${UHI.num(r.latency_ms, 1)} ms</td></tr>`).join("") : `<tr><td colspan="8" class="empty">No requests yet</td></tr>`;
+});
+</script>
+{% endblock %}

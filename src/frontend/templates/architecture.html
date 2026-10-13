@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block head %}
+<style>
+  .arch .box { fill: var(--panel); stroke: var(--border); stroke-width: 1.5; }
+  .arch .b-store { fill: #e6f4ea; stroke: #1d8102; } .arch .b-compute { fill: #fff1e6; stroke: #e8590c; }
+  .arch .b-ml { fill: #e6f0fd; stroke: #0b63ce; } .arch .b-sec { fill: #f3e8fd; stroke: #8e44ad; } .arch .b-ops { fill: #fdf3d6; stroke: #b86e00; }
+  :root[data-theme="dark"] .arch .b-store { fill: #13301a; } :root[data-theme="dark"] .arch .b-compute { fill: #3a2414; }
+  :root[data-theme="dark"] .arch .b-ml { fill: #10264a; } :root[data-theme="dark"] .arch .b-sec { fill: #2c1a3d; } :root[data-theme="dark"] .arch .b-ops { fill: #3a2c0c; }
+  .arch text { fill: var(--text); font-family: Inter, sans-serif; font-size: 13px; }
+  .arch text.t { font-weight: 700; } .arch text.s { fill: var(--muted); font-size: 11px; }
+  .arch .ln { stroke: var(--muted); stroke-width: 1.6; fill: none; marker-end: url(#ah); }
+  .arch .dash { stroke-dasharray: 5 4; }
+  .arch .band { fill: none; stroke: #c4291c; stroke-width: 1.5; stroke-dasharray: 6 4; }
+</style>
+{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>System architecture</h1><p>Serverless, event-driven AWS architecture for geospatial UHI prediction (region {{ cfg.AWS_REGION }}).</p></div>
+</div>
+<div class="card arch">
+<svg viewBox="0 0 1160 560" role="img" aria-label="AWS architecture diagram">
+  <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor" style="color:var(--muted)"/></marker></defs>
+  <rect class="band" x="200" y="16" width="940" height="46" rx="10"/>
+  <text class="t" x="216" y="44">AWS Step Functions — UHI-End-to-End-Pipeline</text>
+  <text class="s" x="560" y="44">Ingest → Validate → Glue ETL → Crawl → Train ×3 (parallel) → Select → Deploy → Batch → Alert → Record</text>
+
+  <rect class="box" x="20" y="100" width="155" height="190" rx="10"/>
+  <text class="t" x="34" y="126">Data sources</text>
+  <text x="34" y="154">Landsat 8/9 L2</text><text class="s" x="34" y="170">LST, NDVI, NDBI, NDWI</text>
+  <text x="34" y="198">Meteorology</text><text class="s" x="34" y="214">IMD / Open-Meteo</text>
+  <text x="34" y="242">LULC · DEM · hydro</text><text class="s" x="34" y="258">land use, elevation</text>
+
+  <rect class="box b-store" x="210" y="150" width="140" height="70" rx="10"/><text class="t" x="224" y="178">Amazon S3</text><text class="s" x="224" y="198">raw/ zone (versioned)</text>
+  <rect class="box b-compute" x="390" y="100" width="150" height="62" rx="10"/><text class="t" x="404" y="126">AWS Lambda</text><text class="s" x="404" y="146">uhi-validate-upload</text>
+  <rect class="box b-compute" x="390" y="200" width="150" height="62" rx="10"/><text class="t" x="404" y="226">AWS Glue</text><text class="s" x="404" y="246">ETL job + crawler</text>
+  <rect class="box b-store" x="580" y="150" width="140" height="70" rx="10"/><text class="t" x="594" y="178">Amazon S3</text><text class="s" x="594" y="198">processed/ zone</text>
+  <rect class="box b-ml" x="760" y="100" width="165" height="62" rx="10"/><text class="t" x="774" y="126">SageMaker Training</text><text class="s" x="774" y="146">Linear · RF · GBoost</text>
+  <rect class="box b-ml" x="760" y="200" width="165" height="62" rx="10"/><text class="t" x="774" y="226">Registry → Endpoint</text><text class="s" x="774" y="246">uhi-intensity-endpoint</text>
+  <rect class="box b-store" x="965" y="100" width="175" height="62" rx="10"/><text class="t" x="979" y="126">Amazon S3</text><text class="s" x="979" y="146">model-artifacts/ · predictions/</text>
+  <rect class="box b-store" x="965" y="200" width="175" height="62" rx="10"/><text class="t" x="979" y="226">Amazon RDS</text><text class="s" x="979" y="246">PostgreSQL metadata</text>
+
+  <rect class="box b-sec" x="760" y="340" width="165" height="62" rx="10"/><text class="t" x="774" y="366">API Gateway</text><text class="s" x="774" y="386">/api/v1 · throttling</text>
+  <rect class="box b-sec" x="965" y="340" width="175" height="62" rx="10"/><text class="t" x="979" y="366">Amazon Cognito</text><text class="s" x="979" y="386">user pool · groups</text>
+  <rect class="box" x="760" y="460" width="165" height="62" rx="10"/><text class="t" x="774" y="486">Web console</text><text class="s" x="774" y="506">map · predict · admin</text>
+  <rect class="box" x="965" y="460" width="175" height="62" rx="10"/><text class="t" x="979" y="486">API clients</text><text class="s" x="979" y="506">x-api-key (QGIS, scripts)</text>
+  <rect class="box b-sec" x="580" y="340" width="140" height="62" rx="10"/><text class="t" x="594" y="366">AWS IAM</text><text class="s" x="594" y="386">least-privilege roles</text>
+  <rect class="box b-ops" x="210" y="340" width="330" height="62" rx="10"/><text class="t" x="224" y="366">Amazon CloudWatch</text><text class="s" x="224" y="386">logs · metrics · alarms (all services)</text>
+  <rect class="box b-ops" x="210" y="460" width="330" height="62" rx="10"/><text class="t" x="224" y="486">Amazon SNS</text><text class="s" x="224" y="506">uhi-heat-alerts · uhi-pipeline-alerts → email / SMS / webhook</text>
+
+  <path class="ln" d="M175 185 H208"/>
+  <path class="ln" d="M350 175 C370 175 370 131 388 131"/>
+  <path class="ln" d="M465 162 V198"/>
+  <path class="ln" d="M540 231 C560 231 560 195 578 195"/>
+  <path class="ln" d="M720 175 C740 175 740 131 758 131"/>
+  <path class="ln" d="M842 162 V198"/>
+  <path class="ln" d="M925 131 H963"/>
+  <path class="ln" d="M925 231 H963"/>
+  <path class="ln" d="M1052 262 C1052 300 900 300 860 338"/>
+  <path class="ln" d="M965 371 H927"/>
+  <path class="ln" d="M842 402 V458"/>
+  <path class="ln" d="M1052 458 C1052 430 900 430 880 404"/>
+  <path class="ln" d="M375 402 V458"/>
+  <path class="ln dash" d="M465 262 V338"/>
+  <path class="ln dash" d="M760 371 H542"/>
+  <path class="ln dash" d="M650 340 V222"/>
+</svg>
+</div>
+<div class="grid g2 mt">
+  <div class="card flush"><div class="card-head" style="padding:14px 18px 0"><h2>Service → implementation</h2></div>
+    <table class="tbl"><thead><tr><th>AWS service</th><th>Project role</th><th>Code</th></tr></thead><tbody>
+      {% for s, r, f in [
+        ("Amazon S3", "Data lake: raw, processed, artifacts, predictions, logs", "src/aws_cloud/s3.py"),
+        ("AWS Lambda", "Ingest, upload validation, heat alerts", "src/lambdas/handlers.py"),
+        ("AWS Glue", "ETL + Data Catalog crawler", "src/ai_model/preprocessing.py"),
+        ("Amazon SageMaker", "Training jobs, registry, endpoint, batch transform", "src/aws_cloud/sagemaker.py"),
+        ("Amazon RDS", "Metadata, predictions, audit log", "src/aws_cloud/rds.py"),
+        ("API Gateway", "Authorizer, IAM checks, throttling, access logs", "src/aws_cloud/api_gateway.py"),
+        ("Amazon Cognito", "Sign-up / sign-in, groups, ID tokens", "src/aws_cloud/cognito.py"),
+        ("CloudWatch", "Logs, metrics, alarms", "src/aws_cloud/cloudwatch.py"),
+        ("Amazon SNS", "Heat and pipeline alerts", "src/aws_cloud/sns.py"),
+        ("Step Functions", "End-to-end orchestration with retries", "src/aws_cloud/step_functions.py"),
+        ("AWS IAM", "Least-privilege policy evaluation", "src/aws_cloud/iam.py"),
+      ] %}<tr><td><b>{{ s }}</b></td><td>{{ r }}</td><td><code class="hint">{{ f }}</code></td></tr>{% endfor %}
+    </tbody></table></div>
+  <div class="card"><h2>Deployment options</h2>
+    <dl class="kv"><dt>Local (default)</dt><dd><code>python run.py</code> — every service emulated in <code>cloud_runtime/</code></dd>
+      <dt>Hybrid AWS</dt><dd><code>CLOUD_MODE=aws</code> mirrors S3 objects and SNS messages to your AWS account via boto3</dd>
+      <dt>Container</dt><dd><code>docker compose up --build</code></dd>
+      <dt>Infrastructure as code</dt><dd><code>infrastructure/terraform/</code> and <code>infrastructure/cloudformation/</code> define the real AWS resources</dd>
+      <dt>CI</dt><dd><code>.github/workflows/ci.yml</code> runs the pipeline and API tests on every push</dd></dl>
+    <h3 class="mt">Security controls</h3>
+    <ul class="muted" style="line-height:1.8;padding-left:18px;margin:0"><li>Raw zone immutable (explicit IAM Deny on delete)</li><li>SSE-S3 encryption, block-public-access, versioning</li>
+      <li>Salted PBKDF2 passwords, signed expiring tokens</li><li>Parameterised SQL; read-only query editor</li><li>Per-identity rate limiting and full access logging</li><li>No credentials in the repository (<code>.env</code> ignored)</li></ul></div>
+</div>
+{% endblock %}

@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Amazon RDS · metadata database</h1><p>Dataset versions, grid predictions, hotspot summaries, prediction requests and the audit trail.</p></div>
+  <div class="actions">{% if can("rds:CreateDBSnapshot") %}<button class="btn" id="snapBtn">Take snapshot</button>{% endif %}</div>
+</div>
+<div class="grid g-1-2">
+  <div>
+    <div class="card" id="inst"></div>
+    <div class="card flush mt"><div class="card-head" style="padding:14px 18px 0"><h2>Tables</h2></div><table class="tbl"><tbody id="tables"></tbody></table></div>
+    <div class="card flush mt"><div class="card-head" style="padding:14px 18px 0"><h2>Snapshots</h2></div><table class="tbl"><tbody id="snaps"></tbody></table></div>
+  </div>
+  <div>
+    <div class="card">
+      <div class="card-head"><h2>Query editor</h2><small>read-only · single SELECT</small></div>
+      <div class="row" style="margin-bottom:8px">
+        <button class="btn sm" data-q="SELECT lulc_class AS zone, COUNT(*) cells FROM (SELECT DISTINCT grid_id, lulc_code, CASE lulc_code WHEN 0 THEN 'Water' WHEN 1 THEN 'Forest' WHEN 2 THEN 'Agriculture' WHEN 3 THEN 'Open' WHEN 4 THEN 'Low urban' WHEN 5 THEN 'High urban' ELSE 'Industrial' END lulc_class FROM grid_predictions) GROUP BY zone ORDER BY cells DESC">Cells by land use</button>
+        <button class="btn sm" data-q="SELECT obs_date, ROUND(AVG(uhi_predicted),2) mean_uhi, ROUND(MAX(uhi_predicted),2) max_uhi, SUM(risk_level='Severe') severe_cells FROM grid_predictions GROUP BY obs_date ORDER BY obs_date">UHI by date</button>
+        <button class="btn sm" data-q="SELECT grid_id, obs_date, uhi_observed, uhi_predicted, ROUND(uhi_predicted-uhi_observed,3) residual FROM grid_predictions ORDER BY ABS(uhi_predicted-uhi_observed) DESC LIMIT 25">Largest residuals</button>
+        <button class="btn sm" data-q="SELECT * FROM datasets ORDER BY id DESC">Dataset versions</button>
+      </div>
+      <textarea class="in" id="sql">SELECT grid_id, obs_date, latitude, longitude, uhi_predicted, risk_level
+FROM grid_predictions
+WHERE risk_level = 'Severe'
+ORDER BY uhi_predicted DESC
+LIMIT 20</textarea>
+      <div class="row mt"><button class="btn primary" id="runSql">Run (Ctrl+Enter)</button><span class="hint" id="sqlMeta"></span></div>
+    </div>
+    <div class="card flush mt"><div class="table-wrap"><table class="tbl" id="result"><tbody><tr><td class="empty">Run a query to see results.</td></tr></tbody></table></div></div>
+    <div class="card flush mt"><div class="card-head" style="padding:14px 18px 0"><h2>Audit log</h2></div><div class="table-wrap" style="max-height:300px"><table class="tbl"><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Detail</th></tr></thead><tbody id="audit"></tbody></table></div></div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function load() {
+  const r = await UHI.api("/rds"), i = r.instance;
+  document.getElementById("inst").innerHTML = `<div class="card-head"><h2>${i.DBInstanceIdentifier}</h2>${UHI.badge("Available")}</div><dl class="kv">
+    <dt>Engine</dt><dd>${i.Engine} ${i.EngineVersion}</dd><dt>Class</dt><dd>${i.DBInstanceClass}</dd><dt>Endpoint</dt><dd><code>${i.Endpoint}</code></dd>
+    <dt>Encrypted</dt><dd>${i.StorageEncrypted ? "Yes (KMS)" : "No"}</dd><dt>Public access</dt><dd>${i.PubliclyAccessible ? "Yes" : "No — private subnet"}</dd>
+    <dt>Backups</dt><dd>${i.BackupRetentionPeriod} days</dd></dl>`;
+  document.getElementById("tables").innerHTML = r.tables.map(t => `<tr class="click" data-t="${t.table}"><td><code>${t.table}</code></td><td class="num">${t.rows.toLocaleString()} rows</td></tr>`).join("");
+  document.querySelectorAll("[data-t]").forEach(tr => tr.onclick = () => { document.getElementById("sql").value = `SELECT * FROM ${tr.dataset.t} LIMIT 50`; run(); });
+  document.getElementById("snaps").innerHTML = r.snapshots.map(s => `<tr><td><code class="hint">${s.DBSnapshotIdentifier}</code></td><td class="num">${UHI.bytes(s.Size)}</td></tr>`).join("") || `<tr><td class="empty">No snapshots</td></tr>`;
+  document.getElementById("audit").innerHTML = r.audit.map(a => `<tr><td class="nowrap">${UHI.ago(a.ts)}</td><td>${UHI.esc(a.actor)}</td><td><code>${a.action}</code></td><td class="hint">${UHI.esc(a.detail)}</td></tr>`).join("");
+}
+async function run() {
+  try {
+    const r = await UHI.api("/rds/query", { method: "POST", body: { sql: document.getElementById("sql").value } });
+    document.getElementById("sqlMeta").textContent = `${r.rows.length} row(s) · ${r.elapsedMs} ms`;
+    document.getElementById("result").innerHTML = `<thead><tr>${r.columns.map(c => `<th>${UHI.esc(c)}</th>`).join("")}</tr></thead><tbody>` +
+      (r.rows.map(row => `<tr>${row.map((v, i) => `<td>${r.columns[i] === "risk_level" ? UHI.risk(v) : typeof v === "number" && !Number.isInteger(v) ? v.toFixed(3) : UHI.esc(v)}</td>`).join("")}</tr>`).join("") || `<tr><td class="empty" colspan="${r.columns.length}">No rows</td></tr>`) + "</tbody>";
+  } catch (e) { document.getElementById("sqlMeta").textContent = e.message; }
+}
+document.getElementById("runSql").onclick = run;
+document.getElementById("sql").onkeydown = e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) run(); };
+document.querySelectorAll("[data-q]").forEach(b => b.onclick = () => { document.getElementById("sql").value = b.dataset.q; run(); });
+document.getElementById("snapBtn")?.addEventListener("click", async () => { const r = await UHI.api("/rds/snapshot", { method: "POST" }); UHI.toast("Snapshot " + r.snapshot); load(); });
+load();
+</script>
+{% endblock %}

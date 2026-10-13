@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Cloud pipeline</h1><p>AWS Step Functions orchestrates Lambda, Glue and SageMaker into one reproducible workflow.</p></div>
+  <div class="actions">
+    {% if can("states:StartExecution") %}
+    <label class="row" style="gap:6px;font-size:13px"><input type="checkbox" id="regen"> Re-ingest raw data</label>
+    <button class="btn primary" id="runBtn">Start execution</button>{% endif %}
+  </div>
+</div>
+<div class="tabs" data-tabs="pTabs">
+  <button class="tab active" data-tab="t-sfn">Step Functions</button>
+  <button class="tab" data-tab="t-glue">Glue ETL</button>
+  <button class="tab" data-tab="t-lambda">Lambda functions</button>
+</div>
+<div id="pTabs">
+  <div class="tab-panel active" id="t-sfn">
+    <div class="grid g-1-2">
+      <div class="card"><div class="card-head"><h2>Graph view</h2><span id="execBadge"></span></div><div class="flow" id="graph"></div>
+        <p class="hint mt">Click a state to inspect its output.</p></div>
+      <div>
+        <div class="card"><div class="card-head"><h2>Execution</h2><small id="execName"></small></div><div id="execInfo" class="muted">–</div></div>
+        <div class="card flush mt"><div class="card-head" style="padding:14px 18px 0"><h2>Executions</h2><small><code>{{ 'UHI-End-to-End-Pipeline' }}</code></small></div>
+          <div class="table-wrap" style="max-height:360px"><table class="tbl"><thead><tr><th>Name</th><th>Status</th><th>Started</th><th>By</th><th class="right">Duration</th></tr></thead><tbody id="execBody"></tbody></table></div></div>
+        <div class="card mt"><div class="card-head"><h2>Amazon States Language definition</h2></div><pre class="code" id="asl"></pre></div>
+      </div>
+    </div>
+  </div>
+  <div class="tab-panel" id="t-glue">
+    <div class="grid g-1-2">
+      <div class="card" id="glueJob"></div>
+      <div class="card flush"><div class="card-head" style="padding:14px 18px 0"><h2>Job runs</h2>{% if can("glue:StartJobRun") %}<button class="btn sm" id="glueRun">Run ETL job</button>{% endif %}</div>
+        <div class="table-wrap"><table class="tbl"><thead><tr><th>Run id</th><th>State</th><th>Started</th><th>Trigger</th><th class="right">Time</th><th class="right">DPU-s</th><th class="right">Rows out</th></tr></thead><tbody id="glueRuns"></tbody></table></div></div>
+    </div>
+  </div>
+  <div class="tab-panel" id="t-lambda">
+    <div class="card flush"><table class="tbl"><thead><tr><th>Function</th><th>Runtime</th><th>Memory</th><th>Timeout</th><th>Trigger</th><th class="right">Invocations</th><th class="right">Errors</th><th></th></tr></thead><tbody id="fnBody"></tbody></table></div>
+    <div class="grid g-2-1 mt">
+      <div class="card flush"><div class="card-head" style="padding:14px 18px 0"><h2>Recent invocations</h2></div>
+        <div class="table-wrap" style="max-height:340px"><table class="tbl"><thead><tr><th>Time</th><th>Function</th><th>Status</th><th class="right">Duration</th><th>Request id</th></tr></thead><tbody id="invBody"></tbody></table></div></div>
+      <div class="card"><h2>Function settings</h2>
+        <label class="row" style="gap:8px"><input type="checkbox" id="autoEtl"> Start Glue ETL automatically after a valid upload</label>
+        <p class="hint">Environment variable <code>AUTO_ETL_ON_UPLOAD</code> of <code>uhi-validate-upload</code>.</p></div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+let current = null, info = null;
+async function load() {
+  info = await UHI.api("/pipeline");
+  document.getElementById("asl").textContent = JSON.stringify(info.definition, null, 2);
+  document.getElementById("execBody").innerHTML = info.executions.length ? info.executions.map(e => `<tr class="click" data-n="${e.name}">
+    <td><code>${e.name}</code></td><td>${UHI.badge(e.status)}</td><td class="nowrap">${UHI.ago(e.startDate)}</td><td>${UHI.esc(e.startedBy)}</td>
+    <td class="num">${e.durationS ? e.durationS + " s" : "-"}</td></tr>`).join("") : `<tr><td colspan="5" class="empty">No executions yet</td></tr>`;
+  document.querySelectorAll("#execBody tr.click").forEach(r => r.onclick = () => { current = r.dataset.n; showExec(); });
+  if (!current && info.executions.length) current = info.executions[0].name;
+  showExec();
+}
+async function showExec() {
+  if (!current) { drawGraph(null); return; }
+  const ex = await UHI.api("/pipeline/executions/" + current);
+  drawGraph(ex);
+  document.getElementById("execName").textContent = ex.name;
+  document.getElementById("execBadge").innerHTML = UHI.badge(ex.status);
+  document.getElementById("execInfo").innerHTML = `<dl class="kv"><dt>ARN</dt><dd><code>${ex.executionArn}</code></dd><dt>Status</dt><dd>${UHI.badge(ex.status)}</dd>
+    <dt>Started</dt><dd>${UHI.local(ex.startDate)} by ${UHI.esc(ex.startedBy)}</dd><dt>Stopped</dt><dd>${UHI.local(ex.stopDate)}</dd>
+    <dt>Duration</dt><dd>${ex.durationS ? ex.durationS + " s" : "-"}</dd>${ex.error ? `<dt>Error</dt><dd style="color:var(--bad)">${UHI.esc(ex.error)}</dd>` : ""}</dl>`;
+}
+function stateBox(s, extra = "") {
+  return `<div class="state ${s.status}" data-s="${s.name}" ${extra}>${s.status === "RUNNING" ? '<div class="spinner"></div>' : ""}
+    <div class="st-name">${s.name}<small>${s.resource || s.type}</small></div><span class="hint">${s.durationS != null ? s.durationS + "s" : ""}</span></div>`;
+}
+function drawGraph(ex) {
+  const states = ex ? ex.states : Object.entries(info.definition.States).map(([n, d]) => ({ name: n, type: d.Type, resource: d.Resource, status: "PENDING", branches: d.Branches }));
+  const defs = info.definition.States;
+  document.getElementById("graph").innerHTML = `<div class="state SUCCEEDED" style="width:auto;border-radius:20px;padding:4px 16px"><b>Start</b></div><div class="arrow"></div>` +
+    states.map(s => {
+      if (s.type === "Parallel") {
+        const out = s.output || {};
+        return `<div class="par">${defs[s.name].Branches.map(b => `<div class="state ${s.status === "SUCCEEDED" ? "SUCCEEDED" : s.status}" data-s="${s.name}">
+          ${s.status === "RUNNING" ? '<div class="spinner"></div>' : ""}<div class="st-name">${b}<small>${out[b] ? "R² " + out[b].R2 : "sagemaker:train"}</small></div></div>`).join("")}</div>`;
+      }
+      return stateBox(s);
+    }).join('<div class="arrow"></div>') + `<div class="arrow"></div><div class="state ${ex && ex.status === "SUCCEEDED" ? "SUCCEEDED" : ""}" style="width:auto;border-radius:20px;padding:4px 16px"><b>End</b></div>`;
+  document.querySelectorAll("#graph [data-s]").forEach(el => el.onclick = () => {
+    const s = states.find(x => x.name === el.dataset.s);
+    UHI.modal(s.name, `<dl class="kv"><dt>Type</dt><dd>${s.type}</dd><dt>Resource</dt><dd><code>${s.resource}</code></dd><dt>Status</dt><dd>${UHI.badge(s.status)}</dd>
+      <dt>Started</dt><dd>${UHI.local(s.start)}</dd><dt>Duration</dt><dd>${s.durationS ?? "-"} s</dd><dt>Attempts</dt><dd>${s.attempts ?? 0}</dd></dl>
+      <h3 class="mt">Output</h3><pre class="code">${UHI.esc(JSON.stringify(s.output, null, 2))}</pre>`);
+  });
+}
+document.getElementById("runBtn")?.addEventListener("click", async (e) => {
+  e.target.disabled = true;
+  try { const r = await UHI.api("/pipeline/run", { method: "POST", body: { regenerate: document.getElementById("regen").checked } }); current = r.execution; UHI.toast("Execution started"); load(); }
+  finally { e.target.disabled = false; }
+});
+
+async function loadGlue() {
+  const g = await UHI.api("/glue"), j = g.jobs[0];
+  document.getElementById("glueJob").innerHTML = `<h2>${j.Name}</h2><p class="muted">${j.Description}</p><dl class="kv"><dt>Glue version</dt><dd>${j.GlueVersion}</dd>
+    <dt>Worker type</dt><dd>${j.NumberOfWorkers} × ${j.WorkerType}</dd><dt>IAM role</dt><dd><code>${j.Role}</code></dd><dt>Runs</dt><dd>${j.Runs}</dd><dt>Last state</dt><dd>${UHI.badge(j.LastRunState)}</dd></dl>
+    <h3 class="mt">ETL steps</h3><ol class="muted" style="padding-left:18px;line-height:1.7;margin:0"><li>Kelvin → °C surface temperature</li><li>QA cloud mask</li><li>Per-class median imputation</li>
+    <li>IDW interpolation of station weather</li><li>Join land-use, DEM, hydrology</li><li>UHI = LST − rural reference</li><li>Outlier removal, write processed zone</li></ol>`;
+  document.getElementById("glueRuns").innerHTML = g.runs.length ? g.runs.map(r => `<tr class="click" data-r="${r.Id}"><td><code>${r.Id.slice(0, 14)}…</code></td><td>${UHI.badge(r.JobRunState)}</td>
+    <td class="nowrap">${UHI.ago(r.StartedOn)}</td><td>${UHI.esc(r.Arguments["--trigger"] || "-")}</td><td class="num">${r.ExecutionTime}s</td><td class="num">${r.DPUSeconds}</td>
+    <td class="num">${r.Output ? r.Output.rows.toLocaleString() : "-"}</td></tr>`).join("") : `<tr><td colspan="7" class="empty">No runs</td></tr>`;
+  document.querySelectorAll("#glueRuns tr.click").forEach(tr => tr.onclick = () => {
+    const r = g.runs.find(x => x.Id === tr.dataset.r);
+    UHI.modal("Glue job run", `<pre class="code">${UHI.esc(JSON.stringify(r, null, 2))}</pre>`);
+  });
+}
+document.getElementById("glueRun")?.addEventListener("click", async () => { await UHI.api("/glue/run", { method: "POST" }); UHI.toast("ETL job started"); setTimeout(loadGlue, 800); });
+
+async function loadLambda() {
+  const l = await UHI.api("/lambda/functions");
+  document.getElementById("fnBody").innerHTML = l.functions.map(f => `<tr><td><b>${f.FunctionName}</b><br><span class="hint">${UHI.esc(f.Description)}</span></td>
+    <td>${f.Runtime}</td><td>${f.MemorySize} MB</td><td>${f.Timeout}s</td><td class="hint">${UHI.esc(f.Trigger)}</td><td class="num">${f.Invocations}</td><td class="num">${f.Errors}</td>
+    <td>${window.CAN.lambda && f.FunctionName === "uhi-heat-alert" ? `<button class="btn sm" data-inv="${f.FunctionName}">Test invoke</button>` : ""}</td></tr>`).join("");
+  document.getElementById("invBody").innerHTML = l.invocations.map(i => `<tr><td class="nowrap">${UHI.ago(i.timestamp)}</td><td>${i.function}</td>
+    <td>${UHI.badge(i.status === 200 ? "SUCCEEDED" : "FAILED")}</td><td class="num">${i.durationMs} ms</td><td><code>${i.requestId.slice(0, 8)}</code></td></tr>`).join("") || `<tr><td colspan="5" class="empty">No invocations</td></tr>`;
+  document.getElementById("autoEtl").checked = l.settings.auto_etl_on_upload;
+  document.querySelectorAll("[data-inv]").forEach(b => b.onclick = async () => {
+    const r = await UHI.api("/lambda/invoke/" + b.dataset.inv, { method: "POST", body: {} });
+    UHI.modal("Invocation result", `<pre class="code">${UHI.esc(JSON.stringify(r, null, 2))}</pre>`); loadLambda();
+  });
+}
+document.getElementById("autoEtl").onchange = async (e) => { await UHI.api("/settings", { method: "POST", body: { autoEtl: e.target.checked } }); UHI.toast("Setting saved"); };
+document.querySelector('[data-tab="t-glue"]').addEventListener("tabshown", loadGlue);
+document.querySelector('[data-tab="t-lambda"]').addEventListener("tabshown", loadLambda);
+load(); setInterval(() => { if (info && info.executions.some(e => e.status === "RUNNING")) load(); else if (current) showExec(); }, 2500);
+</script>
+{% endblock %}

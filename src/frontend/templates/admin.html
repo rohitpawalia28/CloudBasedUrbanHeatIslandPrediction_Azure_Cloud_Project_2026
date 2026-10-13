@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Users & roles · Cognito and IAM</h1><p>Cognito groups map to IAM roles; every API call is checked against the role's policy document.</p></div>
+</div>
+{% if not can("cognito:AdminUserList") %}
+<div class="banner warn">You are signed in as <b>{{ user.group }}</b>. Only the <b>admin</b> group can manage users and view IAM policies — this is enforced by the IAM policy evaluator, try any action below to see the AccessDenied response.</div>
+{% endif %}
+<div class="grid g2">
+  <div class="card"><h2>Your identity</h2><dl class="kv"><dt>Email</dt><dd>{{ user.email }}</dd><dt>Cognito group</dt><dd><span class="badge info">{{ user.group }}</span></dd>
+    <dt>IAM role</dt><dd><code>UHI-{{ user.group|capitalize }}</code></dd><dt>Token</dt><dd>Cognito ID token (JWT-style, 8 h)</dd></dl></div>
+  <div class="card" id="pool"><h2>User pool</h2><div class="muted">–</div></div>
+</div>
+<div class="card flush mt"><div class="card-head" style="padding:14px 18px 0"><h2>Users</h2></div>
+  <div class="table-wrap"><table class="tbl"><thead><tr><th>User</th><th>Group</th><th>Status</th><th>Created</th><th>Last login</th><th class="right">Logins</th><th></th></tr></thead><tbody id="users"><tr><td colspan="7" class="empty">–</td></tr></tbody></table></div></div>
+<div class="card mt"><h2>IAM roles & policies</h2><div id="roles" class="muted">–</div></div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function loadUsers() {
+  try {
+    const r = await UHI.api("/cognito/users", { quiet: !window.CAN.admin });
+    document.getElementById("pool").innerHTML = `<h2>User pool</h2><dl class="kv"><dt>Pool id</dt><dd><code>${r.userPoolId}</code></dd><dt>App client</dt><dd><code>${r.clientId}</code></dd>
+      <dt>Groups</dt><dd>${r.groups.join(", ")}</dd><dt>Password policy</dt><dd>${r.passwordPolicy}</dd><dt>Users</dt><dd>${r.users.length}</dd></dl>`;
+    document.getElementById("users").innerHTML = r.users.map(u => `<tr><td><b>${UHI.esc(u.name)}</b><br><span class="hint">${UHI.esc(u.email)}</span></td>
+      <td><select class="in" data-g="${UHI.esc(u.email)}" style="width:auto">${r.groups.map(g => `<option ${g === u.group ? "selected" : ""}>${g}</option>`).join("")}</select></td>
+      <td>${UHI.badge(u.status)}</td><td>${UHI.ago(u.created)}</td><td>${UHI.ago(u.lastLogin)}</td><td class="num">${u.logins}</td>
+      <td><button class="btn sm ${u.status === "CONFIRMED" ? "danger" : ""}" data-s="${UHI.esc(u.email)}" data-to="${u.status === "CONFIRMED" ? "DISABLED" : "CONFIRMED"}">${u.status === "CONFIRMED" ? "Disable" : "Enable"}</button></td></tr>`).join("");
+    document.querySelectorAll("[data-g]").forEach(s => s.onchange = async () => { await UHI.api("/cognito/users/" + encodeURIComponent(s.dataset.g), { method: "POST", body: { group: s.value } }); UHI.toast("Group updated"); loadUsers(); });
+    document.querySelectorAll("[data-s]").forEach(b => b.onclick = async () => { await UHI.api("/cognito/users/" + encodeURIComponent(b.dataset.s), { method: "POST", body: { status: b.dataset.to } }); loadUsers(); });
+  } catch (e) { document.getElementById("users").innerHTML = `<tr><td colspan="7" class="empty">${e.status} — ${UHI.esc(e.message)}</td></tr>`; }
+}
+async function loadRoles() {
+  try {
+    const roles = await UHI.api("/iam/roles", { quiet: !window.CAN.admin });
+    document.getElementById("roles").innerHTML = roles.map(r => `<details style="border-bottom:1px solid var(--border);padding:10px 0"><summary style="cursor:pointer"><b>${r.RoleName}</b> <span class="hint">— ${r.Description}</span></summary>
+      <p class="hint"><code>${r.Arn}</code></p><pre class="code">${UHI.esc(JSON.stringify(r.PolicyDocument, null, 2))}</pre></details>`).join("");
+  } catch (e) { document.getElementById("roles").innerHTML = `<div class="empty">${e.status} — ${UHI.esc(e.message)}</div>`; }
+}
+loadUsers(); loadRoles();
+</script>
+{% endblock %}

@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Amazon SageMaker</h1><p>Training jobs, model registry (<code>UHI-Intensity-Models</code>) and the real-time endpoint.</p></div>
+  <div class="actions">{% if can("sagemaker:CreateTrainingJob") %}<button class="btn primary" id="newJob">Create training job</button>{% endif %}</div>
+</div>
+<div class="grid g-1-2">
+  <div class="card" id="endpoint"><h2>Endpoint</h2><div class="muted">–</div></div>
+  <div class="card"><div class="card-head"><h2>Model comparison</h2><small>held-out spatial blocks</small></div><div class="chart-box"><canvas id="cmpChart"></canvas></div></div>
+</div>
+<div class="card flush mt"><div class="card-head" style="padding:14px 18px 0"><h2>Training jobs</h2><small id="jobCount"></small></div>
+  <div class="table-wrap"><table class="tbl"><thead><tr><th>Name</th><th>Algorithm</th><th>Status</th><th>Instance</th><th class="right">MAE</th><th class="right">RMSE</th><th class="right">R²</th><th class="right">CV R²</th><th class="right">Billable</th><th>Created</th></tr></thead><tbody id="jobBody"></tbody></table></div></div>
+<div class="card flush mt"><div class="card-head" style="padding:14px 18px 0"><h2>Model registry</h2><small>approve → deploy</small></div>
+  <div class="table-wrap"><table class="tbl"><thead><tr><th>Version</th><th>Algorithm</th><th>Approval</th><th class="right">R²</th><th class="right">RMSE</th><th>Artifact</th><th></th></tr></thead><tbody id="pkgBody"></tbody></table></div></div>
+{% endblock %}
+{% block scripts %}
+<script>
+let sm = null;
+async function load() {
+  sm = await UHI.api("/sagemaker");
+  const ep = sm.endpoint;
+  document.getElementById("endpoint").innerHTML = ep ? `<div class="card-head"><h2>Endpoint</h2>${UHI.badge(ep.EndpointStatus)}</div>
+    <dl class="kv"><dt>Name</dt><dd><code>${ep.EndpointName}</code></dd><dt>Model</dt><dd>${ep.AlgorithmLabel} · v${ep.ModelPackageVersion}</dd>
+    <dt>Instance</dt><dd>${ep.ProductionVariants[0].InstanceType} × ${ep.ProductionVariants[0].InitialInstanceCount}</dd><dt>Data capture</dt><dd>enabled</dd>
+    <dt>R² / RMSE / MAE</dt><dd><b>${ep.Metrics.R2}</b> / ${ep.Metrics.RMSE} °C / ${ep.Metrics.MAE} °C</dd><dt>Updated</dt><dd>${UHI.local(ep.LastModifiedTime)}</dd>
+    <dt>ARN</dt><dd><code>${ep.EndpointArn}</code></dd></dl><a class="btn mt" href="/predict">Invoke endpoint →</a>` :
+    `<h2>Endpoint</h2><div class="banner warn">No endpoint deployed yet. Run the pipeline or deploy a model version below.</div>`;
+  const done = sm.jobs.filter(j => j.FinalMetrics).slice(0, 10).reverse();
+  UHI.chart("cmpChart", { type: "bar", data: { labels: done.map(j => j.Algorithm.replace("_", " ") + " · " + j.TrainingJobName.slice(-12, -4)), datasets: [
+      { label: "R²", data: done.map(j => j.FinalMetrics.R2), backgroundColor: UHI.PALETTE[1] },
+      { label: "RMSE °C", data: done.map(j => j.FinalMetrics.RMSE), backgroundColor: UHI.PALETTE[0] },
+      { label: "MAE °C", data: done.map(j => j.FinalMetrics.MAE), backgroundColor: "rgba(232,89,12,.4)" }] },
+    options: { plugins: { legend: { position: "bottom" } } } });
+  document.getElementById("jobCount").textContent = sm.jobs.length + " jobs";
+  document.getElementById("jobBody").innerHTML = sm.jobs.map(j => { const m = j.FinalMetrics || {}; return `<tr class="click" data-j="${j.TrainingJobName}">
+    <td><code>${j.TrainingJobName}</code></td><td>${j.AlgorithmLabel}</td><td>${UHI.badge(j.TrainingJobStatus === "InProgress" ? j.SecondaryStatus : j.TrainingJobStatus)}</td>
+    <td>${j.ResourceConfig.InstanceType}</td><td class="num">${UHI.num(m.MAE, 3)}</td><td class="num">${UHI.num(m.RMSE, 3)}</td><td class="num"><b>${UHI.num(m.R2, 3)}</b></td>
+    <td class="num">${UHI.num(m.CV_R2_mean, 3)}</td><td class="num">${j.BillableTimeInSeconds}s</td><td class="nowrap">${UHI.ago(j.CreationTime)}</td></tr>`; }).join("") || `<tr><td colspan="10" class="empty">No training jobs</td></tr>`;
+  document.querySelectorAll("#jobBody tr.click").forEach(r => r.onclick = () => showJob(r.dataset.j));
+  const canEdit = window.CAN.train;
+  document.getElementById("pkgBody").innerHTML = sm.packages.map(p => `<tr><td><b>v${p.ModelPackageVersion}</b>${ep && ep.ModelPackageVersion === p.ModelPackageVersion ? ' <span class="badge ok">deployed</span>' : ""}</td>
+    <td>${p.AlgorithmLabel}</td><td>${UHI.badge(p.ModelApprovalStatus)}</td><td class="num">${UHI.num(p.Metrics.R2, 3)}</td><td class="num">${UHI.num(p.Metrics.RMSE, 3)}</td>
+    <td><code class="hint">${p.ModelDataUrl.replace("s3://{{ cfg.S3_BUCKET }}/", "")}</code></td>
+    <td class="nowrap">${canEdit ? `<button class="btn sm" data-ap="${p.ModelPackageVersion}" data-st="Approved">Approve</button>
+      <button class="btn sm danger" data-ap="${p.ModelPackageVersion}" data-st="Rejected">Reject</button>
+      <button class="btn sm primary" data-dep="${p.ModelPackageVersion}">Deploy</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="7" class="empty">Registry empty</td></tr>`;
+  document.querySelectorAll("[data-ap]").forEach(b => b.onclick = async () => { await UHI.api(`/sagemaker/packages/${b.dataset.ap}/approval`, { method: "POST", body: { status: b.dataset.st } }); load(); });
+  document.querySelectorAll("[data-dep]").forEach(b => b.onclick = async () => {
+    b.disabled = true; b.innerHTML = '<div class="spinner"></div> Deploying';
+    try { const r = await UHI.api("/sagemaker/deploy", { method: "POST", body: { version: +b.dataset.dep } });
+      UHI.toast(`Endpoint now serves v${b.dataset.dep}; batch transform rescored ${r.batchTransform.rows} cells`); } finally { load(); }
+  });
+}
+async function showJob(name) {
+  const j = await UHI.api("/sagemaker/jobs/" + name);
+  UHI.modal(name, `<div class="row">${UHI.badge(j.TrainingJobStatus)} <span class="hint">${j.AlgorithmLabel}</span></div>
+    ${j.FailureReason ? `<div class="err-box mt">${UHI.esc(j.FailureReason)}</div>` : ""}
+    ${j.FinalMetrics ? `<div class="grid g4 mt">${["MAE", "RMSE", "R2", "CV_R2_mean"].map(k => `<div class="kpi"><label>${k.replace("_mean", "")}</label><div class="v" style="font-size:20px">${j.FinalMetrics[k]}</div></div>`).join("")}</div>
+    <div class="grid g2 mt"><div><h3>Permutation feature importance</h3><div class="chart-box"><canvas id="fiChart"></canvas></div></div>
+    <div><h3>Observed vs predicted (held-out)</h3><div class="chart-box"><canvas id="scChart"></canvas></div></div></div>` : ""}
+    <dl class="kv mt"><dt>Training image</dt><dd><code>${j.TrainingImage}</code></dd><dt>Input</dt><dd><code>${j.InputDataConfig}</code></dd>
+    <dt>Output</dt><dd><code>${j.OutputDataConfig}</code></dd><dt>Role</dt><dd><code>${j.RoleArn}</code></dd>
+    <dt>Hyperparameters</dt><dd><code>${UHI.esc(JSON.stringify(j.HyperParameters))}</code></dd><dt>Split</dt><dd>${j.FinalMetrics ? j.FinalMetrics.train_rows + " train / " + j.FinalMetrics.test_rows + " test rows (unseen 8×8 spatial blocks)" : "-"}</dd></dl>
+    <p class="hint mt">Logs: CloudWatch log group <code>/aws/sagemaker/TrainingJobs</code>, stream <code>${name}/algo-1</code></p>`);
+  if (j.FeatureImportance) {
+    UHI.chart("fiChart", { type: "bar", data: { labels: j.FeatureImportance.map(f => f.feature), datasets: [{ label: "Importance", data: j.FeatureImportance.map(f => f.importance), backgroundColor: UHI.PALETTE[0] }] },
+      options: { indexAxis: "y", plugins: { legend: { display: false } } } });
+    UHI.chart("scChart", { type: "scatter", data: { datasets: [{ label: "cells", data: j.Scatter.map(p => ({ x: p.observed, y: p.predicted })), backgroundColor: "rgba(11,99,206,.45)", pointRadius: 2.5 }] },
+      options: { plugins: { legend: { display: false } }, scales: { x: { title: { display: true, text: "Observed UHI °C" } }, y: { title: { display: true, text: "Predicted UHI °C" } } } } });
+  }
+}
+document.getElementById("newJob")?.addEventListener("click", () => {
+  const algos = sm.algorithms;
+  UHI.modal("Create training job", `<div class="field"><label class="f">Algorithm</label><select class="in" id="algo">${Object.entries(algos).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join("")}</select></div>
+    <div class="field"><label class="f">Instance type</label><select class="in" id="inst"><option>ml.m5.xlarge</option><option>ml.m5.2xlarge</option><option>ml.c5.2xlarge</option></select></div>
+    <h3>Hyperparameters</h3><div class="grid g3" id="hps"></div>
+    <p class="hint">Input: <code>s3://{{ cfg.S3_BUCKET }}/processed/uhi_model_ready.csv</code> · validation on unseen spatial blocks.</p>
+    <button class="btn primary" id="startJob">Start training</button>`);
+  const fill = () => { const d = algos[document.getElementById("algo").value].defaults;
+    document.getElementById("hps").innerHTML = Object.entries(d).map(([k, v]) => `<div class="field"><label class="f">${k}</label><input class="in" data-hp="${k}" value="${v}"></div>`).join(""); };
+  document.getElementById("algo").onchange = fill; fill();
+  document.getElementById("startJob").onclick = async () => {
+    const hp = {}; document.querySelectorAll("[data-hp]").forEach(i => hp[i.dataset.hp] = i.value);
+    const r = await UHI.api("/sagemaker/train", { method: "POST", body: { algorithm: document.getElementById("algo").value, instanceType: document.getElementById("inst").value, hyperparameters: hp } });
+    UHI.closeModal(); UHI.toast("Started " + r.TrainingJobName); load();
+  };
+});
+window.addEventListener("themechange", load);
+load(); setInterval(() => { if (sm && sm.jobs.some(j => j.TrainingJobStatus === "InProgress")) load(); }, 2500);
+</script>
+{% endblock %}

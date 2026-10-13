@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ 'Sign in' if mode == 'login' else 'Create account' }} · UHI GeoAI Cloud</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/console.css') }}">
+</head>
+<body>
+<div class="auth-wrap">
+  <section class="auth-hero">
+    <div class="brand" style="padding:0;border:0"><div class="logo">UHI</div><div><b>UHI GeoAI Cloud</b><small style="color:#c6d0de">{{ cfg.COURSE }}</small></div></div>
+    <div>
+      <h1>Cloud-Based Urban Heat Island Prediction using Geospatial AI</h1>
+      <p>Satellite land-surface temperature, vegetation and built-up indices, land use and weather flow through a serverless
+        AWS data lake, an automated ETL pipeline and SageMaker models to map heat-prone zones across {{ cfg.STUDY_AREA.name }}.</p>
+      <div class="svc-list">
+        {% for s in ["Amazon S3", "AWS Lambda", "AWS Glue", "Amazon SageMaker", "Amazon RDS", "API Gateway", "Amazon Cognito", "CloudWatch", "Amazon SNS", "Step Functions", "IAM"] %}<span>{{ s }}</span>{% endfor %}
+      </div>
+    </div>
+    <small style="color:#8796ab">{{ cfg.AUTHOR }} · Region {{ cfg.AWS_REGION }}</small>
+  </section>
+  <section class="auth-form">
+    <form method="post">
+      {% if mode == 'login' %}
+        <h1>Sign in</h1>
+        <p class="muted" style="margin:6px 0 20px">Authenticated by the Cognito user pool.</p>
+      {% else %}
+        <h1>Create account</h1>
+        <p class="muted" style="margin:6px 0 20px">New users join a Cognito group that maps to an IAM role.</p>
+      {% endif %}
+      {% if error %}<div class="err-box">{{ error }}</div>{% endif %}
+      {% if mode == 'register' %}
+        <div class="field"><label class="f" for="name">Full name</label><input class="in" id="name" name="name" required></div>
+      {% endif %}
+      <div class="field"><label class="f" for="email">Email</label><input class="in" id="email" name="email" type="email" required value="{{ request.form.email or ('' if mode == 'register' else cfg.ADMIN_EMAIL) }}"></div>
+      <div class="field"><label class="f" for="password">Password</label><input class="in" id="password" name="password" type="password" required {% if mode == 'login' %}placeholder="{{ cfg.ADMIN_PASSWORD }}"{% endif %}>
+        {% if policy %}<small class="hint">{{ policy }}</small>{% endif %}</div>
+      {% if mode == 'register' %}
+        <div class="field"><label class="f" for="group">Role (Cognito group)</label>
+          <select class="in" id="group" name="group"><option value="viewer">Viewer — dashboard, map and predictions</option><option value="analyst">Analyst — run pipelines and train models</option></select></div>
+      {% endif %}
+      <button class="btn primary" style="width:100%;justify-content:center;padding:10px">{{ 'Sign in' if mode == 'login' else 'Create account' }}</button>
+      <p class="muted" style="margin-top:16px;font-size:13px">
+        {% if mode == 'login' %}No account? <a href="/register">Create one</a><br>Demo admin: <code>{{ cfg.ADMIN_EMAIL }}</code> / <code>{{ cfg.ADMIN_PASSWORD }}</code>
+        {% else %}Already registered? <a href="/login">Sign in</a>{% endif %}
+      </p>
+    </form>
+  </section>
+</div>
+</body>
+</html>

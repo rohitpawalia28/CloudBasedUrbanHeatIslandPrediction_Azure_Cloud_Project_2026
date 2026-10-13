@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block head %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Heat Risk Map</h1><p>1 km grid over {{ cfg.STUDY_AREA.name }} · data served from RDS through API Gateway.</p></div>
+  <div class="actions row">
+    <select class="in" id="date" style="width:auto"></select>
+    <select class="in" id="layer" style="width:auto">
+      <option value="uhi">Predicted UHI intensity</option><option value="obs">Observed UHI (satellite)</option>
+      <option value="lst">Land surface temperature</option><option value="ndvi">Vegetation (NDVI)</option>
+      <option value="ndbi">Built-up (NDBI)</option><option value="lulc">Land use / land cover</option><option value="risk">Heat-risk class</option>
+    </select>
+    <label class="row" style="gap:6px;font-size:13px"><input type="checkbox" id="hotOnly"> High/Severe only</label>
+    <label class="row" style="gap:6px;font-size:13px">Opacity <input type="range" id="opacity" min="0.2" max="1" step="0.05" value="0.72" style="width:90px"></label>
+  </div>
+</div>
+<div class="grid g-2-1">
+  <div id="map"></div>
+  <div class="card" id="panel" style="max-height:calc(100vh - 210px);overflow:auto">
+    <h2>Cell inspector</h2>
+    <p class="muted">Click any grid cell to see its satellite features, model prediction and history across acquisition dates.</p>
+    <div id="summary"></div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const LULC = {{ cfg.LULC_CLASSES | tojson }};
+const LULC_COL = { 0: "#2b83ba", 1: "#1a7837", 2: "#a6d96a", 3: "#d9c39a", 4: "#f4a582", 5: "#b2182b", 6: "#7b3294" };
+const RISK_COL = { Low: "#4caf50", Moderate: "#f4c430", High: "#fd8d3c", Severe: "#c4291c" };
+if (!window.L) { document.getElementById("map").innerHTML = '<div class="empty">The map library (Leaflet CDN) could not be loaded — check your internet connection.</div>'; throw new Error("Leaflet unavailable"); }
+const map = L.map("map", { preferCanvas: true }).setView([{{ (cfg.STUDY_AREA.lat_min + cfg.STUDY_AREA.lat_max) / 2 }}, {{ (cfg.STUDY_AREA.lon_min + cfg.STUDY_AREA.lon_max) / 2 }}], 11);
+L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", { attribution: "&copy; OpenStreetMap &copy; CARTO", maxZoom: 18 }).addTo(map);
+let layerGroup = L.layerGroup().addTo(map), data = null, selected = null;
+const legend = L.control({ position: "bottomleft" });
+legend.onAdd = () => { const d = L.DomUtil.create("div", "map-legend"); d.id = "legend"; return d; };
+legend.addTo(map);
+
+function colorFor(c, layer) {
+  switch (layer) {
+    case "uhi": return UHI.uhiColor(c.uhi);
+    case "obs": return UHI.uhiColor(c.obs);
+    case "lst": return UHI.seqColor(c.lst, 30, 56);
+    case "ndvi": return UHI.seqColor(c.ndvi, -0.1, 0.7, true);
+    case "ndbi": return UHI.seqColor(c.ndbi, -0.4, 0.45);
+    case "lulc": return LULC_COL[c.lulc_code];
+    case "risk": return RISK_COL[c.risk];
+  }
+}
+function drawLegend(layer) {
+  const el = document.getElementById("legend");
+  const rows = {
+    uhi: [[-4, "≤ −4 °C (cooler)"], [0, "0 °C"], [2, "+2 °C"], [4, "+4 °C"], [6, "+6 °C"], [9, "≥ +9 °C"]].map(([v, l]) => [UHI.uhiColor(v), l]),
+    lst: [[30, "30 °C"], [38, "38 °C"], [46, "46 °C"], [56, "56 °C"]].map(([v, l]) => [UHI.seqColor(v, 30, 56), l]),
+    ndvi: [[-0.1, "−0.1 bare / water"], [0.3, "0.3"], [0.7, "0.7 dense vegetation"]].map(([v, l]) => [UHI.seqColor(v, -0.1, 0.7, true), l]),
+    ndbi: [[-0.4, "−0.4"], [0, "0"], [0.45, "0.45 built-up"]].map(([v, l]) => [UHI.seqColor(v, -0.4, 0.45), l]),
+    lulc: Object.entries(LULC).map(([k, v]) => [LULC_COL[k], v]),
+    risk: Object.entries(RISK_COL).map(([k, v]) => [v, k + " risk"]),
+  };
+  rows.obs = rows.uhi;
+  el.innerHTML = `<b>${document.querySelector("#layer option:checked").textContent}</b><br>` + rows[layer].map(([c, l]) => `<i style="background:${c}"></i>${l}`).join("<br>");
+}
+function render() {
+  if (!data) return;
+  layerGroup.clearLayers();
+  const layer = document.getElementById("layer").value, hotOnly = document.getElementById("hotOnly").checked;
+  const op = +document.getElementById("opacity").value, dlat = data.cellSize.lat / 2, dlon = data.cellSize.lon / 2;
+  data.cells.forEach(c => {
+    if (hotOnly && !["High", "Severe"].includes(c.risk)) return;
+    const r = L.rectangle([[c.lat - dlat, c.lon - dlon], [c.lat + dlat, c.lon + dlon]],
+      { stroke: c.grid_id === selected, color: "#111", weight: 2, fillColor: colorFor(c, layer), fillOpacity: op });
+    r.on("click", () => inspect(c));
+    r.bindTooltip(`${c.grid_id}<br>UHI +${UHI.num(c.uhi)} °C · ${c.risk}`, { sticky: true });
+    layerGroup.addLayer(r);
+  });
+  drawLegend(layer);
+}
+async function load() {
+  const date = document.getElementById("date").value;
+  data = await UHI.api("/map" + (date ? "?date=" + date : ""));
+  const cells = data.cells, hot = cells.filter(c => ["High", "Severe"].includes(c.risk)).length;
+  const mean = cells.reduce((a, c) => a + c.uhi, 0) / cells.length;
+  if (!selected) document.getElementById("summary").innerHTML = `
+    <div class="grid g2 mt"><div class="kpi"><label>Mean UHI</label><div class="v">+${UHI.num(mean)}<small> °C</small></div></div>
+    <div class="kpi hot"><label>High/Severe cells</label><div class="v">${hot}</div></div></div>`;
+  render();
+}
+async function inspect(c) {
+  selected = c.grid_id; render();
+  const d = await UHI.api("/cell/" + c.grid_id), f = d.latest;
+  document.getElementById("summary").innerHTML = `
+    <div class="row" style="margin:6px 0 10px"><code>${c.grid_id}</code> ${UHI.risk(c.risk)}</div>
+    <div class="grid g2"><div class="kpi hot"><label>Predicted UHI</label><div class="v">+${UHI.num(c.uhi)}<small> °C</small></div></div>
+    <div class="kpi"><label>Observed (satellite)</label><div class="v">${c.obs >= 0 ? "+" : ""}${UHI.num(c.obs)}<small> °C</small></div></div></div>
+    <div class="chart-box mt" style="height:180px"><canvas id="cellChart"></canvas></div>
+    <dl class="kv mt"><dt>Land use</dt><dd>${LULC[f.lulc_code]}</dd><dt>Coordinates</dt><dd>${f.latitude.toFixed(4)}, ${f.longitude.toFixed(4)}</dd>
+    <dt>LST</dt><dd>${UHI.num(f.lst_celsius, 1)} °C (rural ref ${UHI.num(f.rural_reference_lst, 1)} °C)</dd>
+    <dt>NDVI / NDBI / NDWI</dt><dd>${UHI.num(f.ndvi, 3)} / ${UHI.num(f.ndbi, 3)} / ${UHI.num(f.ndwi, 3)}</dd>
+    <dt>Albedo</dt><dd>${UHI.num(f.albedo, 3)}</dd><dt>Urban density</dt><dd>${UHI.num(f.urban_density, 2)}</dd>
+    <dt>Distance to Yamuna</dt><dd>${(f.distance_to_water_m / 1000).toFixed(2)} km</dd><dt>Elevation</dt><dd>${UHI.num(f.elevation_m, 0)} m</dd>
+    <dt>Air temp / RH / wind</dt><dd>${UHI.num(f.air_temperature_celsius, 1)} °C / ${UHI.num(f.humidity_percent, 0)} % / ${UHI.num(f.wind_speed_ms, 1)} m/s</dd></dl>
+    <a class="btn primary mt" href="/predict?lat=${f.latitude}&lon=${f.longitude}">Run what-if scenario →</a>`;
+  UHI.chart("cellChart", { type: "line", data: { labels: d.history.map(h => h.obs_date), datasets: [
+    { label: "Predicted", data: d.history.map(h => h.uhi_predicted), borderColor: UHI.PALETTE[0], tension: .3 },
+    { label: "Observed", data: d.history.map(h => h.uhi_observed), borderColor: UHI.PALETTE[1], borderDash: [4, 4], tension: .3 }] },
+    options: { plugins: { legend: { position: "bottom" } } } });
+}
+(async () => {
+  const dates = await UHI.api("/dates");
+  if (!dates.length) { document.getElementById("summary").innerHTML = `<div class="banner warn">No predictions yet — run the pipeline from the dashboard.</div>`; return; }
+  document.getElementById("date").innerHTML = dates.map(d => `<option ${d === dates[dates.length - 1] ? "selected" : ""}>${d}</option>`).join("");
+  load();
+})();
+document.getElementById("date").onchange = load;
+["layer", "hotOnly", "opacity"].forEach(id => document.getElementById(id).addEventListener("input", render));
+</script>
+{% endblock %}

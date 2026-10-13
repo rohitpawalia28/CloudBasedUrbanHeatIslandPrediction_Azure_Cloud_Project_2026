@@ -1,0 +1,8 @@
+.git
+.venv
+venv
+__pycache__
+cloud_runtime
+.env
+.vscode
+infrastructure/terraform/.terraform

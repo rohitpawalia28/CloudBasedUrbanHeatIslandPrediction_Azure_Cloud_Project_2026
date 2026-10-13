@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Data Lake · Amazon S3</h1><p>Bucket <code>s3://{{ cfg.S3_BUCKET }}</code> with raw → processed → model-artifacts → predictions zones.</p></div>
+  <div class="actions"><button class="btn" id="refresh">Refresh</button></div>
+</div>
+<div class="tabs" data-tabs="dlTabs">
+  <button class="tab active" data-tab="t-objects">Objects</button>
+  <button class="tab" data-tab="t-upload">Upload data</button>
+  <button class="tab" data-tab="t-catalog">Glue Data Catalog</button>
+  <button class="tab" data-tab="t-bucket">Bucket configuration</button>
+</div>
+<div id="dlTabs">
+  <div class="tab-panel active" id="t-objects">
+    <div class="grid" style="grid-template-columns:240px minmax(0,1fr)">
+      <div class="card prefix-list" id="prefixes"></div>
+      <div class="card flush">
+        <div class="card-head" style="padding:14px 18px 0"><h2 id="prefixTitle">All objects</h2><input class="in" id="search" placeholder="Filter by key…" style="width:220px"></div>
+        <div class="table-wrap" style="max-height:600px"><table class="tbl"><thead><tr><th>Key</th><th class="right">Size</th><th>Last modified</th><th>Class</th><th>Encryption</th><th>Version</th></tr></thead><tbody id="objBody"></tbody></table></div>
+      </div>
+    </div>
+  </div>
+  <div class="tab-panel" id="t-upload">
+    <div class="grid g2">
+      <div class="card">
+        <h2>Upload to the raw zone</h2>
+        <p class="muted">Uploading a CSV to <code>raw/</code> fires an <b>S3 ObjectCreated</b> event → <b>Lambda</b> <code>uhi-validate-upload</code> checks the schema → valid files start the <b>Glue</b> ETL job automatically.</p>
+        <div class="field"><label class="f">Destination prefix</label>
+          <select class="in" id="prefix"><option>raw/landsat/</option><option>raw/meteorology/</option><option>raw/static/</option><option>raw/other/</option><option>predictions/manual/</option></select></div>
+        <div class="dropzone" id="drop">Drop a file here or click to choose<input type="file" id="file" hidden></div>
+        <p class="hint mt">Tip: run <code>python scripts/fetch_real_weather.py</code> to download real Open-Meteo weather for the stations and upload the output to <code>raw/meteorology/</code>.</p>
+        {% if not can("s3:PutObject") %}<div class="banner warn mt">Your role cannot upload (s3:PutObject denied).</div>{% endif %}
+      </div>
+      <div class="card"><h2>Event flow</h2><div id="eventFlow" class="muted">Upload a file to watch the S3 → Lambda → Glue chain.</div></div>
+    </div>
+  </div>
+  <div class="tab-panel" id="t-catalog">
+    <div class="card"><div class="card-head"><h2>Database <code id="dbName"></code></h2>{% if can("glue:StartCrawler") %}<button class="btn sm" id="crawl">Run crawler</button>{% endif %}</div><div id="catalog"></div></div>
+  </div>
+  <div class="tab-panel" id="t-bucket"><div class="grid g2" id="bucketCfg"></div></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+let objects = [], currentPrefix = "";
+const ZONES = [["", "All objects"], ["raw/landsat/", "raw / landsat"], ["raw/meteorology/", "raw / meteorology"], ["raw/static/", "raw / static"],
+  ["processed/", "processed"], ["model-artifacts/", "model-artifacts"], ["predictions/", "predictions"], ["logs/", "logs"], ["quarantine/", "quarantine"]];
+
+async function loadObjects() {
+  objects = await UHI.api("/s3/objects");
+  document.getElementById("prefixes").innerHTML = "<h3>Prefixes</h3>" + ZONES.map(([p, l]) => {
+    const n = objects.filter(o => o.Key.startsWith(p)).length;
+    return `<button data-p="${p}" class="${p === currentPrefix ? "active" : ""}"><span>${l}</span><span>${n}</span></button>`;
+  }).join("");
+  document.querySelectorAll("#prefixes button").forEach(b => b.onclick = () => { currentPrefix = b.dataset.p; loadObjects(); });
+  renderObjects();
+}
+function renderObjects() {
+  const q = document.getElementById("search").value.toLowerCase();
+  const list = objects.filter(o => o.Key.startsWith(currentPrefix) && o.Key.toLowerCase().includes(q));
+  document.getElementById("prefixTitle").textContent = (currentPrefix || "All objects") + ` (${list.length})`;
+  document.getElementById("objBody").innerHTML = list.length ? list.map(o => `<tr class="click" data-k="${UHI.esc(o.Key)}">
+    <td><code>${UHI.esc(o.Key)}</code></td><td class="num">${UHI.bytes(o.Size)}</td><td class="nowrap">${UHI.ago(o.LastModified)}</td>
+    <td>${o.StorageClass || "STANDARD"}</td><td>${o.ServerSideEncryption ? '<span class="badge ok">SSE-' + o.ServerSideEncryption + '</span>' : "-"}</td>
+    <td><code>${(o.VersionId || "-").slice(0, 8)}</code></td></tr>`).join("") : `<tr><td colspan="6" class="empty">No objects</td></tr>`;
+  document.querySelectorAll("#objBody tr.click").forEach(r => r.onclick = () => showObject(r.dataset.k));
+}
+async function showObject(key) {
+  const d = await UHI.api("/s3/object?key=" + encodeURIComponent(key));
+  const h = d.head;
+  UHI.modal(key.split("/").pop(), `
+    <dl class="kv"><dt>S3 URI</dt><dd><code>${d.uri}</code></dd><dt>ARN</dt><dd><code>${d.arn}</code></dd>
+    <dt>Size</dt><dd>${UHI.bytes(h.Size)}</dd><dt>Content type</dt><dd>${h.ContentType}</dd><dt>ETag</dt><dd><code>${h.ETag}</code></dd>
+    <dt>Version</dt><dd><code>${h.VersionId}</code> (${d.versions.length} older version${d.versions.length === 1 ? "" : "s"})</dd>
+    <dt>Encryption</dt><dd>SSE-${h.ServerSideEncryption}</dd><dt>Metadata</dt><dd><code>${UHI.esc(JSON.stringify(h.Metadata))}</code></dd></dl>
+    ${d.preview ? `<h3 class="mt">Preview</h3><pre class="code">${UHI.esc(d.preview)}</pre>` : ""}
+    <div class="row mt"><a class="btn primary" href="/api/v1/s3/download?key=${encodeURIComponent(key)}">Download</a>
+    <button class="btn" id="presign">Create pre-signed URL</button>
+    ${!key.startsWith("raw/") && window.CAN.upload ? `<button class="btn danger" id="delObj">Delete</button>` : ""}</div><div id="presignOut" class="mt"></div>`);
+  document.getElementById("presign").onclick = async () => {
+    const r = await UHI.api("/s3/presign?key=" + encodeURIComponent(key) + "&expires=900");
+    document.getElementById("presignOut").innerHTML = `<p class="hint">Valid for 15 minutes, works without signing in:</p><pre class="code">${location.origin + r.url}</pre>`;
+  };
+  const del = document.getElementById("delObj");
+  if (del) del.onclick = async () => { if (!confirm("Delete " + key + "?")) return; await UHI.api("/s3/object?key=" + encodeURIComponent(key), { method: "DELETE" }); UHI.closeModal(); UHI.toast("Deleted"); loadObjects(); };
+}
+document.getElementById("search").oninput = renderObjects;
+document.getElementById("refresh").onclick = loadObjects;
+
+// ---- upload
+const drop = document.getElementById("drop"), file = document.getElementById("file");
+drop.onclick = () => file.click();
+drop.ondragover = e => { e.preventDefault(); drop.classList.add("drag"); };
+drop.ondragleave = () => drop.classList.remove("drag");
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove("drag"); upload(e.dataTransfer.files[0]); };
+file.onchange = () => upload(file.files[0]);
+async function upload(f) {
+  if (!f) return;
+  const fd = new FormData(); fd.append("file", f); fd.append("prefix", document.getElementById("prefix").value);
+  const flow = document.getElementById("eventFlow");
+  flow.innerHTML = `<div class="row"><div class="spinner"></div> PUT ${UHI.esc(f.name)}…</div>`;
+  try {
+    const r = await UHI.api("/s3/upload", { method: "POST", body: fd });
+    const key = r.uploaded.Key;
+    flow.innerHTML = `<div class="flow" style="align-items:stretch">
+      <div class="state SUCCEEDED"><div class="st-name">S3 PutObject<small>${UHI.esc(key)} · ${UHI.bytes(r.uploaded.Size)}</small></div></div>
+      ${r.triggered.length ? `<div class="state RUNNING" id="fl-lambda"><div class="st-name">Lambda uhi-validate-upload<small>event: s3:ObjectCreated:Put</small></div><div class="spinner"></div></div>
+      <div class="state" id="fl-glue"><div class="st-name">Glue uhi-etl-preprocess<small>starts when validation passes</small></div></div>` :
+      `<p class="hint">No event notification matches this prefix (only raw/*.csv triggers the pipeline).</p>`}</div>`;
+    UHI.toast("Uploaded " + key);
+    if (r.triggered.length && window.CAN.logs) watchFlow(key);
+    loadObjects();
+  } catch (e) { flow.innerHTML = `<div class="err-box">${UHI.esc(e.message)}</div>`; }
+}
+async function watchFlow(key) {
+  for (let i = 0; i < 40; i++) {
+    await new Promise(r => setTimeout(r, 1500));
+    const v = await UHI.api("/s3/object?key=" + encodeURIComponent("logs/validation/" + key.replaceAll("/", "_") + ".json"), { quiet: true }).catch(() => null);
+    if (!v) continue;
+    const res = JSON.parse(v.preview || "{}");
+    const lam = document.getElementById("fl-lambda");
+    lam.className = "state " + (res.valid ? "SUCCEEDED" : "FAILED");
+    lam.innerHTML = `<div class="st-name">Lambda uhi-validate-upload<small>${res.valid ? "valid · " + res.rows + " rows" : UHI.esc(res.issues.join("; "))}</small></div>`;
+    if (!res.valid) return;
+    if (!res.glue_job_run) { document.getElementById("fl-glue").innerHTML = `<div class="st-name">Glue ETL<small>auto-ETL disabled in settings</small></div>`; return; }
+    for (let j = 0; j < 60; j++) {
+      const g = await UHI.api("/glue", { quiet: true }).catch(() => null);
+      const run = g && g.runs.find(x => x.Id === res.glue_job_run);
+      const el = document.getElementById("fl-glue");
+      if (run) {
+        el.className = "state " + run.JobRunState;
+        el.innerHTML = `<div class="st-name">Glue uhi-etl-preprocess<small>${run.Id} · ${run.JobRunState}${run.Output ? " · " + run.Output.rows + " rows → processed/" : ""}${run.ErrorMessage ? " · " + UHI.esc(run.ErrorMessage) : ""}</small></div>`;
+        if (run.JobRunState !== "RUNNING") { loadObjects(); return; }
+      }
+      await new Promise(r => setTimeout(r, 1500));
+    }
+    return;
+  }
+}
+
+// ---- catalog + bucket
+async function loadCatalog() {
+  const g = await UHI.api("/glue");
+  document.getElementById("dbName").textContent = g.database;
+  document.getElementById("catalog").innerHTML = g.catalog.length ? g.catalog.map(t => `
+    <h3>${t.Name} <span class="hint">${t.Classification} · ${UHI.bytes(t.SizeBytes)} · updated ${UHI.ago(t.UpdateTime)}</span></h3>
+    <p class="hint"><code>${t.Location}</code></p>
+    <table class="tbl"><thead><tr><th>#</th><th>Column</th><th>Type</th></tr></thead><tbody>${t.Columns.map((c, i) => `<tr><td>${i + 1}</td><td><code>${c.Name}</code></td><td>${c.Type}</td></tr>`).join("")}</tbody></table>`).join("")
+    : `<p class="empty">No tables yet — run the crawler after the ETL job.</p>`;
+}
+async function loadBucket() {
+  const r = await UHI.api("/s3/buckets"), b = r.buckets[0] || {};
+  document.getElementById("bucketCfg").innerHTML = `
+    <div class="card"><h2>Properties</h2><dl class="kv"><dt>Name</dt><dd>${b.Name}</dd><dt>Region</dt><dd>${b.Region}</dd><dt>Created</dt><dd>${UHI.local(b.CreationDate)}</dd>
+      <dt>Objects</dt><dd>${b.ObjectCount}</dd><dt>Total size</dt><dd>${UHI.bytes(b.TotalSize)}</dd><dt>Versioning</dt><dd>${UHI.badge(b.Versioning === "Enabled" ? "Active" : "Suspended")} ${b.Versioning}</dd>
+      <dt>Default encryption</dt><dd>${b.Encryption.SSEAlgorithm} (SSE-S3)</dd></dl></div>
+    <div class="card"><h2>Block public access</h2><dl class="kv">${Object.entries(b.PublicAccessBlock).map(([k, v]) => `<dt>${k}</dt><dd>${UHI.badge(v ? "Active" : "false")}</dd>`).join("")}</dl></div>
+    <div class="card"><h2>Lifecycle rules</h2><table class="tbl"><thead><tr><th>Rule</th><th>Prefix</th><th>Action</th></tr></thead><tbody>${b.Lifecycle.map(l => `<tr><td>${l.ID}</td><td><code>${l.Prefix}</code></td><td>${l.ExpirationDays ? "Expire after " + l.ExpirationDays + " days" : "Transition to " + l.StorageClass + " after " + l.TransitionDays + " days"}</td></tr>`).join("")}</tbody></table></div>
+    <div class="card"><h2>Event notifications</h2><table class="tbl"><thead><tr><th>Id</th><th>Events</th><th>Filter</th><th>Destination</th></tr></thead><tbody>${r.notifications.map(n => `<tr><td>${n.Id}</td><td>${n.Events.join(", ")}</td><td><code>${n.Filter.Prefix}*${n.Filter.Suffix}</code></td><td>Lambda uhi-validate-upload</td></tr>`).join("")}</tbody></table></div>`;
+}
+document.querySelector('[data-tab="t-catalog"]').addEventListener("tabshown", loadCatalog);
+document.querySelector('[data-tab="t-bucket"]').addEventListener("tabshown", loadBucket);
+document.getElementById("crawl")?.addEventListener("click", async () => { const r = await UHI.api("/glue/crawl", { method: "POST" }); UHI.toast("Crawler updated: " + r.tables.join(", ")); loadCatalog(); });
+loadObjects();
+</script>
+{% endblock %}

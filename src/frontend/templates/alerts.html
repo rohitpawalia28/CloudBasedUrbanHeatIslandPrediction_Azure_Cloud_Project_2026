@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Alerts · Amazon SNS</h1><p>High-heat notifications and pipeline-failure alerts fan out to every subscription.</p></div>
+  <div class="actions"><button class="btn" id="markRead">Mark all read</button></div>
+</div>
+<div class="grid g-2-1">
+  <div class="card flush">
+    <div class="card-head" style="padding:14px 18px 0"><h2>Notification center</h2><small id="msgCount"></small></div>
+    <div id="feed" style="max-height:640px;overflow:auto"></div>
+  </div>
+  <div>
+    <div class="card">
+      <h2>Heat-alert rule</h2>
+      <p class="hint" style="margin-top:-6px">Lambda <code>uhi-heat-alert</code> publishes to <code>uhi-heat-alerts</code> when grid cells exceed this UHI.</p>
+      <label class="f">Threshold: <span id="thVal" class="mono"></span> °C</label>
+      <input type="range" id="th" min="2" max="10" step="0.5">
+      <div class="row mt">
+        {% if can("lambda:UpdateFunctionConfiguration") %}<button class="btn" id="saveTh">Save threshold</button>{% endif %}
+        {% if can("lambda:InvokeFunction") %}<button class="btn primary" id="evalNow">Evaluate now</button>{% endif %}
+      </div>
+    </div>
+    <div class="card mt flush"><div class="card-head" style="padding:14px 18px 0"><h2>Topics</h2></div><table class="tbl"><thead><tr><th>Topic</th><th class="right">Subs</th><th class="right">Msgs</th></tr></thead><tbody id="topicBody"></tbody></table></div>
+  </div>
+</div>
+<div class="card flush mt">
+  <div class="card-head" style="padding:14px 18px 0"><h2>Subscriptions</h2></div>
+  <table class="tbl"><thead><tr><th>Topic</th><th>Protocol</th><th>Endpoint</th><th>Status</th><th></th></tr></thead><tbody id="subBody"></tbody></table>
+  {% if can("sns:Subscribe") %}
+  <div class="row" style="padding:14px 18px">
+    <select class="in" id="s-topic" style="width:auto"><option>uhi-heat-alerts</option><option>uhi-pipeline-alerts</option></select>
+    <select class="in" id="s-proto" style="width:auto"><option value="email">email</option><option value="sms">sms</option><option value="https">https (webhook)</option><option value="app">app</option></select>
+    <input class="in grow" id="s-end" placeholder="you@example.com / +91… / https://…">
+    <button class="btn primary" id="subBtn">Subscribe</button>
+    <button class="btn" id="testBtn">Publish test message</button>
+  </div>
+  <p class="hint" style="padding:0 18px 14px">Email/SMS deliveries are recorded in the delivery log (no messages leave your laptop in emulated mode). With <code>CLOUD_MODE=aws</code> every message is also published to the real SNS topic.</p>
+  {% endif %}
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function load() {
+  const d = await UHI.api("/sns");
+  document.getElementById("th").value = d.threshold; document.getElementById("thVal").textContent = d.threshold;
+  document.getElementById("msgCount").textContent = d.messages.length + " messages";
+  document.getElementById("feed").innerHTML = d.messages.length ? d.messages.map(m => `<div style="padding:12px 18px;border-bottom:1px solid var(--border);${m.Read ? "" : "background:var(--accent-soft)"}">
+    <div class="row" style="justify-content:space-between"><b>${UHI.esc(m.Subject)}</b><span class="hint">${UHI.ago(m.Timestamp)}</span></div>
+    <div class="hint" style="margin:2px 0 6px"><code>${m.Topic}</code> · ${m.Deliveries.length} deliveries ${m.Deliveries.map(x => x.status === "DELIVERED" ? "" : `<span class="badge bad">${x.protocol} ${UHI.esc(x.status)}</span>`).join("")}</div>
+    <div style="white-space:pre-wrap;font-size:13px">${UHI.esc(m.Message)}</div></div>`).join("") : `<div class="empty">No notifications yet</div>`;
+  document.getElementById("topicBody").innerHTML = d.topics.map(t => `<tr><td><b>${t.Name}</b><br><code class="hint">${t.TopicArn}</code></td><td class="num">${t.Subscriptions}</td><td class="num">${t.Messages}</td></tr>`).join("");
+  document.getElementById("subBody").innerHTML = d.subscriptions.map(s => `<tr><td>${s.Topic}</td><td>${s.Protocol}</td><td><code>${UHI.esc(s.Endpoint)}</code></td><td>${UHI.badge(s.Status === "Confirmed" ? "CONFIRMED" : s.Status)}</td>
+    <td>${window.CAN.sns ? `<button class="btn sm danger" data-un="${s.Id}">Unsubscribe</button>` : ""}</td></tr>`).join("");
+  document.querySelectorAll("[data-un]").forEach(b => b.onclick = async () => { await UHI.api("/sns/subscriptions/" + b.dataset.un, { method: "DELETE" }); load(); });
+}
+document.getElementById("th").oninput = e => document.getElementById("thVal").textContent = e.target.value;
+document.getElementById("saveTh")?.addEventListener("click", async () => { await UHI.api("/settings", { method: "POST", body: { threshold: +document.getElementById("th").value } }); UHI.toast("Threshold saved"); });
+document.getElementById("evalNow")?.addEventListener("click", async () => {
+  const r = await UHI.api("/lambda/invoke/uhi-heat-alert", { method: "POST", body: { threshold: +document.getElementById("th").value } });
+  UHI.toast(r.Payload.alert ? `Alert published: ${r.Payload.cells} cells ≥ +${r.Payload.threshold} °C` : "No cells above threshold"); load();
+});
+document.getElementById("subBtn")?.addEventListener("click", async () => {
+  await UHI.api("/sns/subscribe", { method: "POST", body: { topic: document.getElementById("s-topic").value, protocol: document.getElementById("s-proto").value, endpoint: document.getElementById("s-end").value } });
+  UHI.toast("Subscription confirmed"); document.getElementById("s-end").value = ""; load();
+});
+document.getElementById("testBtn")?.addEventListener("click", async () => { await UHI.api("/sns/publish", { method: "POST", body: { topic: document.getElementById("s-topic").value, subject: "Test notification" } }); load(); });
+document.getElementById("markRead").onclick = async () => { await UHI.api("/sns/read", { method: "POST" }); load(); document.querySelector(".icon-btn .count")?.remove(); };
+load();
+</script>
+{% endblock %}

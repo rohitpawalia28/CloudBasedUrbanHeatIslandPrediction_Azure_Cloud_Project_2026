@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Amazon API Gateway</h1><p>REST API <code>uhi-api</code> · Cognito authorizer + API keys · usage-plan throttling · access logs in CloudWatch.</p></div>
+</div>
+<div class="grid g-1-2">
+  <div>
+    <div class="card" id="stage"></div>
+    <div class="card mt">
+      <h2>API keys</h2>
+      <div class="row"><input class="in grow" id="keyName" placeholder="key name, e.g. qgis-plugin"><button class="btn primary" id="newKey">Create key</button></div>
+      <div id="newKeyOut" class="mt"></div>
+      <table class="tbl mt"><tbody id="keys"></tbody></table>
+    </div>
+  </div>
+  <div>
+    <div class="card">
+      <div class="card-head"><h2>Try it</h2><small>uses your signed-in Cognito session</small></div>
+      <div class="row"><select class="in" id="m" style="width:auto"><option>GET</option><option>POST</option></select><input class="in grow mono" id="p" value="/api/v1/hotspots?limit=5"><button class="btn primary" id="send">Send</button></div>
+      <textarea class="in mt" id="b" placeholder='JSON body for POST, e.g. {"latitude": 28.63, "longitude": 77.21}'></textarea>
+      <div class="row mt"><span id="st"></span><span class="hint" id="lt"></span></div>
+      <pre class="code mt" id="out">// response appears here</pre>
+    </div>
+    <div class="card mt"><h2>Client examples</h2><pre class="code" id="examples"></pre></div>
+  </div>
+</div>
+<div class="card flush mt"><div class="card-head" style="padding:14px 18px 0"><h2>Resources</h2><small id="routeCount"></small></div>
+  <div class="table-wrap" style="max-height:560px"><table class="tbl"><thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>IAM action</th><th>Description</th></tr></thead><tbody id="routes"></tbody></table></div></div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function load() {
+  const r = await UHI.api("/apigateway");
+  document.getElementById("stage").innerHTML = `<div class="card-head"><h2>Stage: ${r.stage}</h2>${UHI.badge("Deployed")}</div><dl class="kv">
+    <dt>API id</dt><dd><code>${r.apiId}</code></dd><dt>Invoke URL (AWS)</dt><dd><code>${r.invokeUrl}</code></dd><dt>Local URL</dt><dd><code>${r.localUrl}</code></dd>
+    <dt>Throttling</dt><dd>${r.rateLimitPerMin} requests / minute / identity</dd><dt>Authorizers</dt><dd>Cognito user pool · API key</dd></dl>`;
+  document.getElementById("keys").innerHTML = r.keys.map(k => `<tr><td><b>${UHI.esc(k.name)}</b><br><code class="hint">${k.valuePreview}</code></td><td>${UHI.esc(k.owner)}<br><span class="hint">${k.group}</span></td>
+    <td class="num">${k.requests} req</td><td><button class="btn sm danger" data-del="${k.id}">Revoke</button></td></tr>`).join("") || `<tr><td class="empty">No API keys yet</td></tr>`;
+  document.querySelectorAll("[data-del]").forEach(b => b.onclick = async () => { await UHI.api("/apigateway/keys/" + b.dataset.del, { method: "DELETE" }); load(); });
+  document.getElementById("routeCount").textContent = r.routes.length + " routes";
+  document.getElementById("routes").innerHTML = r.routes.map(x => `<tr class="click" data-path="${x.path}" data-m="${x.methods[0]}"><td>${x.methods.map(m => `<span class="badge ${m === "GET" ? "info" : m === "DELETE" ? "bad" : "ok"}">${m}</span>`).join(" ")}</td>
+    <td><code>${x.path}</code></td><td>${x.auth ? "Cognito / key" : "none"}</td><td><code class="hint">${x.action}</code></td><td class="hint">${UHI.esc(x.description)}</td></tr>`).join("");
+  document.querySelectorAll("#routes tr.click").forEach(tr => tr.onclick = () => { if (tr.dataset.path.includes("<")) return; document.getElementById("p").value = tr.dataset.path; document.getElementById("m").value = tr.dataset.m === "POST" ? "POST" : "GET"; window.scrollTo({ top: 0, behavior: "smooth" }); });
+  document.getElementById("examples").textContent =
+`# curl with an API key
+curl -H "x-api-key: <YOUR_KEY>" ${r.localUrl}/hotspots?limit=5
+
+curl -X POST -H "x-api-key: <YOUR_KEY>" -H "Content-Type: application/json" \\
+     -d '{"latitude": 28.6315, "longitude": 77.2167}' ${r.localUrl}/predict
+
+# Python
+import requests
+r = requests.post("${r.localUrl}/predict", headers={"x-api-key": "<YOUR_KEY>"},
+                  json={"latitude": 28.4950, "longitude": 77.0890, "features": {"ndvi": 0.45}})
+print(r.json()["uhi_intensity_celsius"], r.json()["risk_level"])`;
+}
+document.getElementById("newKey").onclick = async () => {
+  const k = await UHI.api("/apigateway/keys", { method: "POST", body: { name: document.getElementById("keyName").value || "my-key" } });
+  document.getElementById("newKeyOut").innerHTML = `<div class="banner info" style="display:block"><b>Copy this key now — it is shown only once.</b><pre class="code mt">${k.value}</pre></div>`;
+  load();
+};
+document.getElementById("send").onclick = async () => {
+  const m = document.getElementById("m").value, p = document.getElementById("p").value, t0 = performance.now();
+  const init = { method: m, credentials: "same-origin", headers: {} };
+  if (m === "POST") { init.body = document.getElementById("b").value || "{}"; init.headers["Content-Type"] = "application/json"; }
+  const res = await fetch(p, init);
+  const txt = await res.text();
+  document.getElementById("st").innerHTML = UHI.badge(res.ok ? "OK" : "FAILED") + ` <code>${res.status}</code>`;
+  document.getElementById("lt").textContent = `${Math.round(performance.now() - t0)} ms`;
+  try { document.getElementById("out").textContent = JSON.stringify(JSON.parse(txt), null, 2).slice(0, 20000); } catch (e) { document.getElementById("out").textContent = txt.slice(0, 5000); }
+};
+load();
+</script>
+{% endblock %}

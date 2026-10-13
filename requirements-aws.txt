@@ -1,0 +1,3 @@
+# Optional: only needed for CLOUD_MODE=aws and scripts/deploy_to_aws.py
+-r requirements.txt
+boto3>=1.34
