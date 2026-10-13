@@ -260,7 +260,7 @@ The most important driver is land-use class, followed by built-up / vegetation i
 
 ```text
 UHI_Cloud_Project/
-├── api/index.py               # Vercel serverless entry point (+ vercel.json)
+├── app.py                     # Vercel serverless entry point (+ vercel.json)
 ├── run.py                     # entry point: starts the console, first-run pipeline, CLI flags
 ├── start_windows.bat          # one-click start (Windows)
 ├── start_mac_linux.sh         # one-click start (macOS / Linux)
@@ -322,8 +322,8 @@ The project is also deployed as a **serverless function on Vercel**, connected t
 
 | File | Purpose |
 |---|---|
-| `api/index.py` | Serverless entry point – exposes the Flask app; on a cold start it provisions the emulated AWS account in `/tmp` and runs the Step Functions pipeline once (~20–40 s) |
-| `vercel.json` | Routes every URL to the function, sets 2 GB memory / 300 s max duration, excludes docs and tests from the bundle |
+| `app.py` | Serverless entry point (auto-detected by Vercel's Flask preset) – exposes the Flask app; on a cold start it provisions the emulated AWS account in `/tmp` and runs the Step Functions pipeline once (~20–40 s) |
+| `vercel.json` | Sets the function's 300 s max duration and excludes docs and tests from the bundle |
 | `.vercelignore` | Keeps local state and virtual environments out of uploads |
 
 Serverless notes: the code directory is read-only, so state lives in `/tmp` (set automatically when
