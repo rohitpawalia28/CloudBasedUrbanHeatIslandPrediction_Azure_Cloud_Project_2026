@@ -36,7 +36,10 @@ COURSE = "BITE412L - Cloud Computing"
 AUTHOR = "Rohit Kumar (23BIT0030)"
 
 CLOUD_MODE = os.getenv("CLOUD_MODE", "emulated").lower()
-AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
+# Vercel (and AWS Lambda) inject their own AWS_REGION for the host machine, so on serverless
+# the project's region comes from UHI_AWS_REGION only (default Mumbai, ap-south-1).
+_ON_SERVERLESS = bool(os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
+AWS_REGION = os.getenv("UHI_AWS_REGION") or ("ap-south-1" if _ON_SERVERLESS else os.getenv("AWS_REGION", "ap-south-1"))
 AWS_ACCOUNT_ID = os.getenv("AWS_ACCOUNT_ID", "123456789012")
 
 HOST = os.getenv("HOST", "127.0.0.1")
