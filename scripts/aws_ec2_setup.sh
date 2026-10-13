@@ -2,7 +2,9 @@
 # =============================================================================
 #  One-click AWS EC2 setup for the Cloud-Based UHI Prediction platform
 # -----------------------------------------------------------------------------
-#  Paste this whole file into  EC2 > Launch instance > Advanced details > User data
+#  EITHER run it on the server (EC2 Instance Connect):
+#    curl -fsSL https://raw.githubusercontent.com/rohitpawalia28/CloudBasedUrbanHeatIslandPrediction_Azure_Cloud_Project_2026/develop/scripts/aws_ec2_setup.sh | sudo bash
+#  OR paste this whole file into  EC2 > Launch instance > Advanced details > User data
 #  (Ubuntu 24.04 or 22.04 AMI). On first boot it:
 #    1. installs Python, Git and Nginx
 #    2. adds a 2 GB swap file (lets the free-tier t3.micro / t2.micro train models)
@@ -25,8 +27,11 @@ APP_USER="ubuntu"
 id "$APP_USER" >/dev/null 2>&1 || APP_USER="$(logname 2>/dev/null || echo root)"
 
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
-apt-get install -y python3 python3-venv python3-pip git nginx
+# A fresh Ubuntu instance runs unattended-upgrades on first boot and holds the apt lock;
+# wait for it (up to 10 min) instead of failing.
+APT="apt-get -o DPkg::Lock::Timeout=600"
+$APT update -y
+$APT install -y python3 python3-venv python3-pip git nginx curl
 
 # ---- swap (1 GB instances need it for scikit-learn training) ----------------
 if ! swapon --show | grep -q /swapfile; then
