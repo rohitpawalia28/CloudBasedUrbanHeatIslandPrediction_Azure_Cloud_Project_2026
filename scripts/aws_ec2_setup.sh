@@ -3,7 +3,7 @@
 #  One-click AWS EC2 setup for the Cloud-Based UHI Prediction platform
 # -----------------------------------------------------------------------------
 #  EITHER run it on the server (EC2 Instance Connect):
-#    curl -fsSL https://raw.githubusercontent.com/rohitpawalia28/CloudBasedUrbanHeatIslandPrediction_Azure_Cloud_Project_2026/develop/scripts/aws_ec2_setup.sh | sudo bash
+#    curl -fsSL https://raw.githubusercontent.com/rohitpawalia28/CloudBasedUrbanHeatIslandPrediction_Azure_Cloud_Project_2026/main/scripts/aws_ec2_setup.sh | sudo bash
 #  OR paste this whole file into  EC2 > Launch instance > Advanced details > User data
 #  (Ubuntu 24.04 or 22.04 AMI). On first boot it:
 #    1. installs Python, Git and Nginx
@@ -23,7 +23,7 @@ exec > >(tee -a /var/log/uhi-setup.log) 2>&1
 echo "=== UHI setup started $(date) ==="
 
 REPO_URL="https://github.com/rohitpawalia28/CloudBasedUrbanHeatIslandPrediction_Azure_Cloud_Project_2026.git"
-BRANCH="develop"
+BRANCH="main"
 APP_DIR="/opt/uhi"
 APP_USER="ubuntu"
 id "$APP_USER" >/dev/null 2>&1 || APP_USER="$(logname 2>/dev/null || echo root)"
@@ -44,8 +44,9 @@ fi
 
 # ---- code --------------------------------------------------------------------
 if [ -d "$APP_DIR/.git" ]; then
+  # FETCH_HEAD works even when the existing clone tracks another branch (e.g. the old 'develop')
   git -C "$APP_DIR" fetch --depth 1 origin "$BRANCH"
-  git -C "$APP_DIR" reset --hard "origin/$BRANCH"
+  git -C "$APP_DIR" reset --hard FETCH_HEAD
 else
   git clone --depth 1 -b "$BRANCH" "$REPO_URL" "$APP_DIR"
 fi

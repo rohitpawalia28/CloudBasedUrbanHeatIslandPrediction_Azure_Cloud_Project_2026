@@ -394,7 +394,7 @@ to the instance and set `CLOUD_MODE=aws` in `/opt/uhi/.env`.
    choose `uhi-ec2-instance-profile-ap-south-1` → **Update IAM role**.
 4. On the server (EC2 Instance Connect), re-run the setup. It detects the role and switches to `CLOUD_MODE=aws`:
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/rohitpawalia28/CloudBasedUrbanHeatIslandPrediction_Azure_Cloud_Project_2026/develop/scripts/aws_ec2_setup.sh | sudo bash
+   curl -fsSL https://raw.githubusercontent.com/rohitpawalia28/CloudBasedUrbanHeatIslandPrediction_Azure_Cloud_Project_2026/main/scripts/aws_ec2_setup.sh | sudo bash
    ```
 5. Open the site → **Pipeline → Run cloud pipeline**. The data lake is uploaded to the real S3 bucket, and the new
    predictions trigger the real Lambda, which updates CloudWatch and e-mails you an SNS alert.
