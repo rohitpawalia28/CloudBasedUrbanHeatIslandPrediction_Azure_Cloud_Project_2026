@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Real AWS account</h1><p>Live bridge from this platform to real AWS services in <b>{{ region }}</b>, provisioned by the CloudFormation stack <code>uhi-aws-stack.yaml</code>.</p></div>
+  <button class="btn primary" id="invoke">Invoke real Lambda</button>
+</div>
+<div id="banner"></div>
+<div class="grid g4" id="kpis"></div>
+<div class="grid g2 mt">
+  <div class="card"><h2>Connected resources</h2><div id="res" class="muted">–</div></div>
+  <div class="card"><h2>Open in the AWS console</h2><div id="links" class="muted">–</div></div>
+</div>
+<div class="card mt"><h2>How the platform uses real AWS</h2>
+  <div class="table-wrap"><table class="tbl"><thead><tr><th>AWS service</th><th>What happens</th></tr></thead><tbody>
+    <tr><td><b>AWS CloudFormation</b></td><td>One template creates every resource below (Infrastructure as Code)</td></tr>
+    <tr><td><b>Amazon EC2</b> + <b>IAM role</b></td><td>The platform runs on EC2; the instance role grants least-privilege access, no keys stored on the server</td></tr>
+    <tr><td><b>Amazon S3</b></td><td>Every object written to the data lake (raw, processed, models, predictions) is copied to the real bucket</td></tr>
+    <tr><td><b>AWS Lambda</b></td><td><code>uhi-heat-alert-checker</code> runs when new predictions land in S3 (event trigger) and on schedule</td></tr>
+    <tr><td><b>Amazon EventBridge</b></td><td>Daily schedule (06:00 IST) that invokes the heat-alert Lambda</td></tr>
+    <tr><td><b>Amazon SNS</b></td><td>Heat alerts and pipeline alerts are e-mailed through the real topic</td></tr>
+    <tr><td><b>Amazon DynamoDB</b></td><td>Every prediction request is stored in table <code>uhi-predictions</code></td></tr>
+    <tr><td><b>Amazon CloudWatch</b></td><td>Platform logs go to <code>/uhi/platform</code>; UHI metrics, an alarm and the <code>UHI-GeoAI-Operations</code> dashboard</td></tr>
+    <tr><td><b>AWS Systems Manager</b></td><td>Parameter Store <code>/uhi/config</code> tells the platform which resources to use</td></tr>
+  </tbody></table></div></div>
+<div class="card mt" id="lambdaOut" style="display:none"><h2>Lambda result</h2><pre class="code" id="lambdaPre"></pre></div>
+{% endblock %}
+{% block scripts %}
+<script>
+const R = "{{ region }}";
+const C = `https://${R}.console.aws.amazon.com`;
+async function load() {
+  const s = await UHI.api("/aws/status");
+  const on = s.enabled, res = s.resources || {};
+  document.getElementById("banner").innerHTML = on
+    ? (s.error ? `<div class="banner warn">Connected, last AWS error: <code>${UHI.esc(s.error)}</code></div>` : `<div class="banner">Connected to real AWS · config from <b>${UHI.esc(s.config_source || "-")}</b></div>`)
+    : `<div class="banner warn">Running in <b>emulated</b> mode. Deploy <code>infrastructure/cloudformation/uhi-aws-stack.yaml</code>, attach the IAM role to the EC2 instance and set <code>CLOUD_MODE=aws</code> (see README section 10d).</div>`;
+  const k = [["S3 uploads", s.s3_uploads], ["SNS messages", s.sns_publishes], ["DynamoDB writes", s.dynamodb_writes],
+             ["CloudWatch log events", s.log_events], ["Metric data points", s.metric_points], ["Lambda invocations", s.lambda_invocations],
+             ["Mode", s.mode], ["Region", s.region]];
+  document.getElementById("kpis").innerHTML = k.map(([l, v]) => `<div class="card kpi"><label>${l}</label><div class="v">${UHI.esc(String(v ?? 0))}</div></div>`).join("");
+  document.getElementById("res").innerHTML = on ? `<dl class="kv">${Object.entries(res).map(([a, b]) => `<dt>${UHI.esc(a)}</dt><dd><code>${UHI.esc(String(b))}</code></dd>`).join("")}</dl>` : "Not connected";
+  const L = on ? [
+    ["CloudFormation stacks", `${C}/cloudformation/home?region=${R}#/stacks`],
+    ["S3 bucket", `https://s3.console.aws.amazon.com/s3/buckets/${res.bucket}?region=${R}`],
+    ["Lambda function", `${C}/lambda/home?region=${R}#/functions/${res.lambda || "uhi-heat-alert-checker"}`],
+    ["DynamoDB table items", `${C}/dynamodbv2/home?region=${R}#item-explorer?table=${res.table}`],
+    ["CloudWatch dashboard", `${C}/cloudwatch/home?region=${R}#dashboards:name=${res.dashboard || "UHI-GeoAI-Operations"}`],
+    ["CloudWatch logs /uhi/platform", `${C}/cloudwatch/home?region=${R}#logsV2:log-groups/log-group/$252Fuhi$252Fplatform`],
+    ["SNS topic", `${C}/sns/v3/home?region=${R}#/topic/${res.topic_arn}`],
+    ["EventBridge rules", `${C}/events/home?region=${R}#/rules`],
+    ["Parameter Store", `${C}/systems-manager/parameters?region=${R}`],
+    ["EC2 instances", `${C}/ec2/home?region=${R}#Instances:`],
+  ] : [];
+  document.getElementById("links").innerHTML = L.length ? L.map(([t, u]) => `<div style="padding:5px 0"><a href="${u}" target="_blank" rel="noopener">${t} ↗</a></div>`).join("") : "Available once connected";
+  document.getElementById("invoke").disabled = !on;
+}
+document.getElementById("invoke").onclick = async () => {
+  const b = document.getElementById("invoke"); b.disabled = true; b.textContent = "Invoking…";
+  try {
+    const r = await UHI.api("/aws/lambda/heat-check", { method: "POST" });
+    document.getElementById("lambdaOut").style.display = "";
+    document.getElementById("lambdaPre").textContent = JSON.stringify(r, null, 2);
+    UHI.toast("Lambda executed in AWS - check your e-mail for the SNS alert");
+  } finally { b.textContent = "Invoke real Lambda"; load(); }
+};
+load(); setInterval(load, 10000);
+</script>
+{% endblock %}

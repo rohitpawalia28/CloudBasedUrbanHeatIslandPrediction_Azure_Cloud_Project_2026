@@ -2,7 +2,7 @@
 from src import config
 
 PAGES = ["/", "/map", "/predict", "/data-lake", "/pipeline", "/models", "/monitoring",
-         "/alerts", "/database", "/api-access", "/admin", "/architecture"]
+         "/alerts", "/database", "/api-access", "/admin", "/architecture", "/aws"]
 
 
 def test_health(client):
@@ -62,3 +62,8 @@ def test_s3_download_without_key_is_404(client):
 def test_rds_read_only_query(client):
     r = client.post("/api/v1/rds/query", json={"sql": "SELECT COUNT(*) AS n FROM prediction_requests"})
     assert r.status_code == 200
+
+
+def test_aws_status_emulated(client):
+    st = client.get("/api/v1/aws/status").get_json()
+    assert st["mode"] in ("emulated", "aws") and "s3_uploads" in st

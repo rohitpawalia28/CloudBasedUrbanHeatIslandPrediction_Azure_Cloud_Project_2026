@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timezone
 
 from src import config
+from src.aws_cloud import aws_adapter
 
 _LOCK = threading.RLock()
 _DB = config.CLOUDWATCH_ROOT / "cloudwatch.db"
@@ -58,6 +59,7 @@ def log(group: str, message: str, level: str = "INFO", stream: str = None):
             "INSERT INTO log_events (ts, log_group, log_stream, level, message) VALUES (?,?,?,?,?)",
             (time.time(), group, stream, level.upper(), str(message)[:4000]),
         )
+    aws_adapter.mirror_log(group, str(message)[:4000], level.upper())
 
 
 def log_groups():
@@ -93,6 +95,7 @@ def put_metric(namespace: str, name: str, value: float, unit: str = "Count", dim
             "INSERT INTO metrics (ts, namespace, name, value, unit, dimensions) VALUES (?,?,?,?,?,?)",
             (time.time(), namespace, name, float(value), unit, json.dumps(dimensions or {})),
         )
+    aws_adapter.mirror_metric(namespace, name, value, unit, dimensions)
     _evaluate_alarms(namespace, name)
 
 

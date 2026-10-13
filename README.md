@@ -284,6 +284,7 @@ UHI_Cloud_Project/
 │   │   ├── app.py             # Flask app = API Gateway stage + console pages
 │   │   └── cloud_setup.py     # resource provisioning + Step Functions definition
 │   └── frontend/              # HTML templates, CSS, JavaScript (Leaflet, Chart.js)
+├── infrastructure/cloudformation/uhi-aws-stack.yaml   # real AWS resources (IaC)
 ├── scripts/
 │   ├── fetch_real_weather.py  # download real ERA5 weather (Open-Meteo)
 │   └── deploy_to_aws.py       # optional: deploy S3 / SNS / CloudWatch to real AWS
@@ -363,6 +364,47 @@ instance after your demo** to avoid charges, and set an AWS Budget alert.
 Combine with section 10 (`deploy_to_aws.py`, `CLOUD_MODE=aws`) to also mirror the data lake
 and alerts to real S3 / SNS / CloudWatch: attach an IAM role with S3, SNS and CloudWatch access
 to the instance and set `CLOUD_MODE=aws` in `/opt/uhi/.env`.
+
+## 10d. Real AWS services with CloudFormation (recommended for the demo)
+
+`infrastructure/cloudformation/uhi-aws-stack.yaml` creates **real, free-tier-friendly AWS resources** in one step:
+
+| Real AWS service | Resource | Used for |
+|---|---|---|
+| AWS CloudFormation | stack `uhi-cloud` | Infrastructure as Code: creates and deletes everything below |
+| Amazon S3 | `uhi-geoai-data-lake-<account>-ap-south-1` | Real copy of the data lake (versioned, encrypted, private) |
+| AWS Lambda | `uhi-heat-alert-checker` | Reads the latest predictions, publishes metrics and e-mail alerts |
+| Amazon EventBridge | rule `uhi-daily-heat-check` | Runs the Lambda every day at 06:00 IST |
+| S3 event notification | `predictions/*.geojson` | Runs the Lambda automatically after every pipeline run |
+| Amazon SNS | topic `uhi-heat-alerts` | Real e-mail heat alerts |
+| Amazon DynamoDB | table `uhi-predictions` | Every prediction request made in the console or the API |
+| Amazon CloudWatch | log group `/uhi/platform`, alarm `uhi-severe-heat-cells`, dashboard `UHI-GeoAI-Operations` | Real logs, metrics, alarm and dashboard |
+| AWS Systems Manager | Parameter Store `/uhi/config` | Tells the platform which resources to use |
+| AWS IAM | role and instance profile `uhi-ec2-...` | Least-privilege access for the EC2 server (no access keys anywhere) |
+| Amazon EC2 | your instance (section 10c) | Runs the platform |
+
+**Steps (AWS console, region Asia Pacific (Mumbai))**
+
+1. **CloudFormation → Create stack → With new resources** → *Upload a template file* → choose
+   `infrastructure/cloudformation/uhi-aws-stack.yaml` → Next.
+2. Stack name `uhi-cloud`, **AlertEmail** = your e-mail → Next → Next → tick
+   *"I acknowledge that AWS CloudFormation might create IAM resources with custom names"* → **Submit**.
+   Wait for **CREATE_COMPLETE** (2–3 minutes), then **confirm the SNS e-mail** AWS sends you.
+3. **EC2 → Instances →** select your instance → **Actions → Security → Modify IAM role** →
+   choose `uhi-ec2-instance-profile-ap-south-1` → **Update IAM role**.
+4. On the server (EC2 Instance Connect), re-run the setup. It detects the role and switches to `CLOUD_MODE=aws`:
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/rohitpawalia28/CloudBasedUrbanHeatIslandPrediction_Azure_Cloud_Project_2026/develop/scripts/aws_ec2_setup.sh | sudo bash
+   ```
+5. Open the site → **Pipeline → Run cloud pipeline**. The data lake is uploaded to the real S3 bucket, and the new
+   predictions trigger the real Lambda, which updates CloudWatch and e-mails you an SNS alert.
+6. Open the new **Real AWS** page in the console: live counters for S3, SNS, DynamoDB, CloudWatch and Lambda,
+   direct links into the AWS console, and an **Invoke real Lambda** button.
+
+**Cost and clean-up:** everything above stays within the AWS free allowances at this data size (only UHI/* metrics
+are sent to CloudWatch, the DynamoDB table uses 5 read / 5 write units, logs are kept for 7 days).
+To remove it: empty the S3 bucket (S3 → bucket → **Empty**), then **CloudFormation → uhi-cloud → Delete**, and
+terminate the EC2 instance.
 
 ## 11. Troubleshooting
 

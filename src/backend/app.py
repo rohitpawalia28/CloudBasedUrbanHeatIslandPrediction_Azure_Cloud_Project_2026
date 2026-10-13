@@ -127,6 +127,7 @@ def create_app():
         "/monitoring": ("monitoring.html", "CloudWatch"), "/alerts": ("alerts.html", "SNS Alerts"),
         "/database": ("database.html", "RDS Database"), "/api-access": ("api_access.html", "API Gateway"),
         "/admin": ("admin.html", "Cognito & IAM"), "/architecture": ("architecture.html", "Architecture"),
+        "/aws": ("aws_account.html", "Real AWS"),
     }
     for path, (tpl, title) in pages.items():
         def view(tpl=tpl, title=title):
@@ -234,6 +235,11 @@ def create_app():
                        risk_level, model_version, latency_ms) VALUES (?,?,?,?,?,?,?,?,?,?)""",
                     (cloudwatch.now_iso(), g.identity["email"], source, lat, lon, json.dumps(inputs), value,
                      config.risk_level(value), sagemaker.endpoint_model_version(), round(latency, 2)))
+        aws_adapter.mirror_prediction({"timestamp": cloudwatch.now_iso(), "user": g.identity["email"], "source": source,
+                                       "latitude": lat, "longitude": lon, "uhi_predicted": float(value),
+                                       "risk_level": config.risk_level(value),
+                                       "model_version": str(sagemaker.endpoint_model_version()),
+                                       "latency_ms": round(latency, 2), "features": inputs})
 
     @app.route("/api/v1/predict", methods=["POST"])
     @api("uhi:Predict", description="Real-time UHI prediction (SageMaker InvokeEndpoint)")
@@ -622,6 +628,18 @@ def create_app():
         cognito.admin_update_user(email, b.get("group"), b.get("status"))
         rds.audit(g.identity["email"], "ADMIN_UPDATE_USER", f"{email} {b}")
         return ok(cognito.list_users())
+
+    @app.route("/api/v1/aws/status")
+    @api("uhi:Read", description="Real AWS bridge status (CLOUD_MODE=aws)")
+    def aws_status():
+        return ok(aws_adapter.status())
+
+    @app.route("/api/v1/aws/lambda/heat-check", methods=["POST"])
+    @api("lambda:InvokeFunction", description="Invoke the real uhi-heat-alert-checker Lambda")
+    def aws_heat_check():
+        result = aws_adapter.invoke_heat_checker()
+        rds.audit(g.identity["email"], "INVOKE_REAL_LAMBDA", json.dumps(result)[:300])
+        return ok(result)
 
     @app.route("/api/v1/iam/roles")
     @api("iam:ListRoles", description="IAM roles and policies")

@@ -4,7 +4,7 @@
   "functions": {
     "app.py": {
       "maxDuration": 300,
-      "excludeFiles": "{tests/**,docs/**,literature_survey/**,architecture/**,references/**,dataset/**,scripts/**,cloud_runtime/**,.venv/**}"
+      "excludeFiles": "{tests/**,infrastructure/**,docs/**,literature_survey/**,architecture/**,references/**,dataset/**,scripts/**,cloud_runtime/**,.venv/**}"
     }
   }
 }

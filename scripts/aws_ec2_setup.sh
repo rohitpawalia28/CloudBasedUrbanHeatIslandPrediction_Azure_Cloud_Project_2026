@@ -11,8 +11,10 @@
 #    3. clones the project from GitHub into /opt/uhi
 #    4. creates a virtual environment and installs requirements
 #    5. writes /opt/uhi/.env with a random SECRET_KEY and region ap-south-1
-#    6. runs the app as a systemd service (auto-start on reboot, auto-restart)
-#    7. puts Nginx in front on port 80  ->  open  http://<EC2-public-IP>
+#    6. switches to CLOUD_MODE=aws automatically if the instance has an IAM role
+#       (created by infrastructure/cloudformation/uhi-aws-stack.yaml)
+#    7. runs the app as a systemd service (auto-start on reboot, auto-restart)
+#    8. puts Nginx in front on port 80  ->  open  http://<EC2-public-IP>
 #  Progress log on the server:  sudo tail -f /var/log/uhi-setup.log
 #  Re-running the script (sudo bash aws_ec2_setup.sh) updates to the latest commit.
 # =============================================================================
@@ -50,7 +52,7 @@ fi
 
 python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/pip" install --upgrade pip
-"$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
+"$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements-aws.txt"   # requirements + boto3
 
 # ---- configuration (kept across updates) ------------------------------------
 if [ ! -f "$APP_DIR/.env" ]; then
@@ -64,6 +66,17 @@ ADMIN_EMAIL=admin@uhi.cloud
 ADMIN_PASSWORD=Admin@123
 EOF
 fi
+# ---- real AWS mode: switch on automatically when an IAM role is attached ------
+IMDS_TOKEN=$(curl -s -m 2 -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" || true)
+ROLE_HTTP=$(curl -s -o /dev/null -w "%{http_code}" -m 2 -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+  http://169.254.169.254/latest/meta-data/iam/info || true)
+if [ "$ROLE_HTTP" = "200" ]; then
+  sed -i 's/^CLOUD_MODE=.*/CLOUD_MODE=aws/' "$APP_DIR/.env"
+  echo "IAM role detected -> CLOUD_MODE=aws (real S3, SNS, DynamoDB, CloudWatch, Lambda, SSM)"
+else
+  echo "No IAM role attached -> CLOUD_MODE stays as set in $APP_DIR/.env"
+fi
+
 chown -R "$APP_USER":"$APP_USER" "$APP_DIR"
 chmod 600 "$APP_DIR/.env"
 

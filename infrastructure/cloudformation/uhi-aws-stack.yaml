@@ -1,0 +1,334 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Cloud-Based Urban Heat Island Prediction (BITE412L) - real AWS resources.
+  S3 data lake, SNS heat alerts, DynamoDB prediction store, Lambda heat-alert checker
+  (triggered by S3 events and a daily EventBridge schedule), CloudWatch logs / alarm /
+  dashboard, SSM Parameter Store config and an IAM role + instance profile for the EC2 server.
+  Free-tier friendly. Deploy in ap-south-1 (Mumbai).
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Description: E-mail address that receives UHI heat alerts (confirm the SNS e-mail AWS sends you)
+    AllowedPattern: "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+    ConstraintDescription: must be a valid e-mail address
+  UhiThreshold:
+    Type: Number
+    Default: 5
+    Description: UHI intensity (deg C) at or above which a grid cell counts as Severe
+
+Resources:
+  # ------------------------------------------------------------------ S3 ----
+  DataLakeBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: HeatCheckerS3Permission
+    Properties:
+      BucketName: !Sub "uhi-geoai-data-lake-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration: { Status: Enabled }
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-versions
+            Status: Enabled
+            NoncurrentVersionExpiration: { NoncurrentDays: 7 }
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: "s3:ObjectCreated:*"
+            Function: !GetAtt HeatCheckerFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - { Name: prefix, Value: predictions/ }
+                  - { Name: suffix, Value: .geojson }
+      Tags:
+        - { Key: Project, Value: UHI-GeoAI }
+
+  # ----------------------------------------------------------------- SNS ----
+  HeatAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: uhi-heat-alerts
+      DisplayName: UHI Heat Alerts
+      Subscription:
+        - { Protocol: email, Endpoint: !Ref AlertEmail }
+
+  # ------------------------------------------------------------ DynamoDB ----
+  PredictionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: uhi-predictions
+      AttributeDefinitions:
+        - { AttributeName: request_id, AttributeType: S }
+      KeySchema:
+        - { AttributeName: request_id, KeyType: HASH }
+      BillingMode: PROVISIONED
+      ProvisionedThroughput: { ReadCapacityUnits: 5, WriteCapacityUnits: 5 }
+      Tags:
+        - { Key: Project, Value: UHI-GeoAI }
+
+  # ------------------------------------------------------------ CloudWatch ---
+  PlatformLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /uhi/platform
+      RetentionInDays: 7
+
+  HeatCheckerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/uhi-heat-alert-checker
+      RetentionInDays: 7
+
+  SevereHeatAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: uhi-severe-heat-cells
+      AlarmDescription: Grid cells at Severe UHI level detected by the heat-alert Lambda
+      Namespace: UHI/Live
+      MetricName: SevereCells
+      Statistic: Maximum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref HeatAlertTopic]
+
+  OperationsDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: UHI-GeoAI-Operations
+      DashboardBody: !Sub |
+        {"widgets":[
+          {"type":"text","x":0,"y":0,"width":24,"height":2,
+           "properties":{"markdown":"# Cloud-Based Urban Heat Island Prediction\nLive metrics from the EC2 platform and the heat-alert Lambda (region ${AWS::Region})"}},
+          {"type":"metric","x":0,"y":2,"width":8,"height":6,
+           "properties":{"title":"Severe UHI cells","region":"${AWS::Region}","stat":"Maximum","period":300,
+                         "metrics":[["UHI/Live","SevereCells"]]}},
+          {"type":"metric","x":8,"y":2,"width":8,"height":6,
+           "properties":{"title":"Max / mean predicted UHI (deg C)","region":"${AWS::Region}","stat":"Maximum","period":300,
+                         "metrics":[["UHI/Live","MaxUHI"],["UHI/Live","MeanUHI",{"stat":"Average"}]]}},
+          {"type":"metric","x":16,"y":2,"width":8,"height":6,
+           "properties":{"title":"Heat-alert Lambda","region":"${AWS::Region}","stat":"Sum","period":300,
+                         "metrics":[["AWS/Lambda","Invocations","FunctionName","uhi-heat-alert-checker"],
+                                    ["AWS/Lambda","Errors","FunctionName","uhi-heat-alert-checker"]]}},
+          {"type":"metric","x":0,"y":8,"width":12,"height":6,
+           "properties":{"title":"Platform prediction metrics","region":"${AWS::Region}","stat":"Maximum","period":300,
+                         "metrics":[["UHI/Predictions","MaxPredictedUHI"],["UHI/Predictions","CellsAboveThreshold"]]}},
+          {"type":"metric","x":12,"y":8,"width":12,"height":6,
+           "properties":{"title":"DynamoDB writes (prediction requests)","region":"${AWS::Region}","stat":"Sum","period":300,
+                         "metrics":[["AWS/DynamoDB","ConsumedWriteCapacityUnits","TableName","uhi-predictions"]]}}
+        ]}
+
+  # ------------------------------------------------- Lambda heat checker ----
+  HeatCheckerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "uhi-heat-checker-role-${AWS::Region}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: uhi-heat-checker
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject]
+                Resource: !Sub "arn:aws:s3:::uhi-geoai-data-lake-${AWS::AccountId}-${AWS::Region}/predictions/*"
+              - Effect: Allow
+                Action: [sns:Publish]
+                Resource: !Ref HeatAlertTopic
+              - Effect: Allow
+                Action: [cloudwatch:PutMetricData]
+                Resource: "*"
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt HeatCheckerLogGroup.Arn
+
+  HeatCheckerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: uhi-heat-alert-checker
+      Description: Reads the latest UHI hotspot predictions from S3, publishes CloudWatch metrics and SNS alerts
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 60
+      MemorySize: 256
+      Role: !GetAtt HeatCheckerRole.Arn
+      LoggingConfig:
+        LogGroup: !Ref HeatCheckerLogGroup
+      Environment:
+        Variables:
+          BUCKET: !Sub "uhi-geoai-data-lake-${AWS::AccountId}-${AWS::Region}"
+          TOPIC_ARN: !Ref HeatAlertTopic
+          THRESHOLD: !Ref UhiThreshold
+      Code:
+        ZipFile: |
+          import json, os, urllib.parse
+          import boto3
+
+          s3, sns, cw = boto3.client("s3"), boto3.client("sns"), boto3.client("cloudwatch")
+          KEY = "predictions/uhi_latest_hotspots.geojson"
+
+          def handler(event, context):
+              bucket, key, source = os.environ["BUCKET"], KEY, "EventBridge schedule"
+              recs = event.get("Records") or []
+              if recs and "s3" in recs[0]:
+                  bucket = recs[0]["s3"]["bucket"]["name"]
+                  key = urllib.parse.unquote_plus(recs[0]["s3"]["object"]["key"])
+                  source = "S3 ObjectCreated event"
+              try:
+                  body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+              except s3.exceptions.NoSuchKey:
+                  print(f"{key} not found yet - run the pipeline on the platform first")
+                  return {"status": "no-data"}
+              cells = [f["properties"] for f in json.loads(body).get("features", [])]
+              vals = [c.get("uhi_predicted") for c in cells if c.get("uhi_predicted") is not None]
+              if not vals:
+                  return {"status": "empty"}
+              thr = float(os.environ.get("THRESHOLD", "5"))
+              severe = sorted((c for c in cells if (c.get("uhi_predicted") or -99) >= thr),
+                              key=lambda c: -c["uhi_predicted"])
+              stats = {"cells": len(vals), "severe": len(severe), "max": round(max(vals), 2),
+                       "mean": round(sum(vals) / len(vals), 2)}
+              cw.put_metric_data(Namespace="UHI/Live", MetricData=[
+                  {"MetricName": "SevereCells", "Value": stats["severe"], "Unit": "Count"},
+                  {"MetricName": "MaxUHI", "Value": stats["max"], "Unit": "None"},
+                  {"MetricName": "MeanUHI", "Value": stats["mean"], "Unit": "None"}])
+              print(json.dumps({"source": source, "key": key, **stats}))
+              if severe:
+                  date = severe[0].get("date", "")
+                  lines = [f"  {c['grid_id']}: +{round(c['uhi_predicted'], 2)} C ({c.get('risk', '')})" for c in severe[:10]]
+                  sns.publish(TopicArn=os.environ["TOPIC_ARN"],
+                              Subject=f"UHI alert: {stats['severe']} severe heat cells in Delhi NCR"[:99],
+                              Message=(f"Urban Heat Island alert ({source})\n\n"
+                                       f"Prediction date: {date}\nCells analysed: {stats['cells']}\n"
+                                       f"Severe cells (UHI >= {thr} C): {stats['severe']}\n"
+                                       f"Max UHI: +{stats['max']} C   Mean UHI: {stats['mean']} C\n\n"
+                                       "Hottest cells:\n" + "\n".join(lines) +
+                                       "\n\nSatellite-derived surface UHI estimate - decision support only."))
+              return {"status": "ok", **stats}
+
+  HeatCheckerS3Permission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HeatCheckerFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub "arn:aws:s3:::uhi-geoai-data-lake-${AWS::AccountId}-${AWS::Region}"
+
+  # ------------------------------------------------ EventBridge schedule ----
+  DailyHeatCheckRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: uhi-daily-heat-check
+      Description: Runs the UHI heat-alert checker every day at 06:00 IST
+      ScheduleExpression: "cron(30 0 * * ? *)"
+      State: ENABLED
+      Targets:
+        - { Arn: !GetAtt HeatCheckerFunction.Arn, Id: heat-checker }
+
+  DailyHeatCheckPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HeatCheckerFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DailyHeatCheckRule.Arn
+
+  # ------------------------------------------------- SSM Parameter Store ----
+  PlatformConfigParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /uhi/config
+      Type: String
+      Description: Real AWS resource names used by the UHI platform (read at start-up)
+      Value: !Sub |
+        {"bucket": "uhi-geoai-data-lake-${AWS::AccountId}-${AWS::Region}",
+         "topic_arn": "${HeatAlertTopic}",
+         "table": "${PredictionsTable}",
+         "log_group": "/uhi/platform",
+         "lambda": "uhi-heat-alert-checker",
+         "dashboard": "UHI-GeoAI-Operations",
+         "region": "${AWS::Region}"}
+
+  # ---------------------------------------------- IAM role for EC2 server ---
+  Ec2PlatformRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "uhi-ec2-platform-role-${AWS::Region}"
+      Description: Least-privilege role for the EC2 server running the UHI platform
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: uhi-platform-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DataLake
+                Effect: Allow
+                Action: [s3:PutObject, s3:GetObject, s3:DeleteObject, s3:ListBucket]
+                Resource:
+                  - !Sub "arn:aws:s3:::uhi-geoai-data-lake-${AWS::AccountId}-${AWS::Region}"
+                  - !Sub "arn:aws:s3:::uhi-geoai-data-lake-${AWS::AccountId}-${AWS::Region}/*"
+              - Sid: Alerts
+                Effect: Allow
+                Action: [sns:Publish]
+                Resource: !Ref HeatAlertTopic
+              - Sid: Predictions
+                Effect: Allow
+                Action: [dynamodb:PutItem, dynamodb:GetItem, dynamodb:Query, dynamodb:Scan, dynamodb:DescribeTable]
+                Resource: !GetAtt PredictionsTable.Arn
+              - Sid: Logs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents, logs:DescribeLogStreams]
+                Resource: !GetAtt PlatformLogGroup.Arn
+              - Sid: Metrics
+                Effect: Allow
+                Action: [cloudwatch:PutMetricData]
+                Resource: "*"
+              - Sid: Config
+                Effect: Allow
+                Action: [ssm:GetParameter]
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/uhi/config"
+              - Sid: InvokeHeatChecker
+                Effect: Allow
+                Action: [lambda:InvokeFunction]
+                Resource: !GetAtt HeatCheckerFunction.Arn
+
+  Ec2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "uhi-ec2-instance-profile-${AWS::Region}"
+      Roles: [!Ref Ec2PlatformRole]
+
+Outputs:
+  DataLakeBucketName:
+    Value: !Sub "uhi-geoai-data-lake-${AWS::AccountId}-${AWS::Region}"
+  HeatAlertTopicArn:
+    Value: !Ref HeatAlertTopic
+  PredictionsTableName:
+    Value: !Ref PredictionsTable
+  HeatCheckerLambda:
+    Value: !Ref HeatCheckerFunction
+  InstanceProfileName:
+    Description: Attach this to the EC2 instance (Actions > Security > Modify IAM role)
+    Value: !Ref Ec2InstanceProfile
+  DashboardUrl:
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=UHI-GeoAI-Operations"
