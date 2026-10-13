@@ -332,6 +332,38 @@ so the **first page load after a quiet period takes ~30 s**; after that it is in
 new users and API keys are per-instance and reset when Vercel recycles the instance; this is a demo deployment.
 Random Forest uses 60 trees on serverless (120 locally) to fit the CPU limits.
 
+## 10c. Host the platform on AWS EC2 (one-click setup)
+
+`scripts/aws_ec2_setup.sh` turns a fresh Ubuntu EC2 server into a running UHI platform:
+it installs Python, Git and Nginx, adds swap, clones this repo, installs requirements,
+creates `.env` with a random secret, runs the app as a **systemd** service (auto-restart,
+starts on reboot) behind **Nginx on port 80**.
+
+1. AWS console → region **Asia Pacific (Mumbai) ap-south-1** → **EC2 → Launch instance**
+2. Name `uhi-cloud-server`, AMI **Ubuntu Server 24.04 LTS**, type **t3.small**
+   (or free-tier **t3.micro / t2.micro**: works thanks to the swap file, training is slower)
+3. Key pair: create one (needed only for SSH)
+4. Network settings: tick **Allow SSH** and **Allow HTTP traffic from the internet**
+5. Storage: 12 GiB or more
+6. **Advanced details → User data**: paste the entire contents of `scripts/aws_ec2_setup.sh`
+7. **Launch instance**, wait 5–8 minutes, then open `http://<Public IPv4 address>`
+   (the first page load may wait 1–2 minutes while the pipeline trains the models)
+
+Useful commands after `ssh -i key.pem ubuntu@<ip>`:
+
+```bash
+sudo tail -f /var/log/uhi-setup.log                 # watch the setup
+sudo journalctl -u uhi -f                           # application logs
+sudo bash /opt/uhi/scripts/aws_ec2_setup.sh         # update to the latest GitHub commit
+sudo systemctl restart uhi                          # restart the app
+```
+
+Unlike Vercel, data, users and API keys persist on the server's disk. **Stop or terminate the
+instance after your demo** to avoid charges, and set an AWS Budget alert.
+Combine with section 10 (`deploy_to_aws.py`, `CLOUD_MODE=aws`) to also mirror the data lake
+and alerts to real S3 / SNS / CloudWatch: attach an IAM role with S3, SNS and CloudWatch access
+to the instance and set `CLOUD_MODE=aws` in `/opt/uhi/.env`.
+
 ## 11. Troubleshooting
 
 | Problem | Fix |
